@@ -1,20 +1,9 @@
 name: iOS CI
 
 on:
-  push:
-    branches:
-      - master
-      - release
-      - develop
-    tags:
-      - '**'
-    paths-ignore:
-      - '**.md'
-  pull_request:
-    branches:
-      - master
-      - release
-      - develop
+  # 只保留手动触发：Actions 页面点 Run workflow
+  workflow_dispatch:
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true

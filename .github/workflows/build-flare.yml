@@ -5,9 +5,20 @@ on:
   workflow_dispatch:
   push:
     branches: [master]
+    # 只改这些文件时不必重新出包（build-flare.yml 与 .github/apply_signing.sh 不在此列）
     paths-ignore:
       - "**.md"
       - "docs/**"
+      - ".github/workflows/android.yml"
+      - ".github/workflows/desktop.yml"
+      - ".github/workflows/ios.yml"
+      - ".github/workflows/web.yml"
+      - ".github/workflows/static.yml"
+      - ".github/workflows/crowdin-*.yml"
+      - ".github/workflows/pr-quality.yml"
+      - ".github/workflows/dependabot.yml"
+      - ".github/workflows/fdroid-nonfoss-check.yml"
+      - ".github/workflows/issue-edit-history.yml"
 
 env:
   # 注意：if 里不能直接用 secrets.*，必须先经 env 中转

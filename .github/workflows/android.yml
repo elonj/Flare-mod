@@ -1,21 +1,9 @@
 name: Android CI
 
 on:
-  push:
-    branches:
-      - master
-      - release
-      - develop
-    tags:
-      - "**"
-    paths-ignore:
-      - "**.md"
-      - "**.yml"
-  pull_request:
-    branches:
-      - master
-      - release
-      - develop
+  # 只需要 Android APK；本工作流不再自动触发（Actions 页面可手动 Run workflow）
+  workflow_dispatch:
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true

@@ -1,9 +1,21 @@
 name: Build My Flare APK
 
+# 只做 Android APK：出包后可在 run 页面底部 Artifacts 下载
 on:
-  workflow_dispatch:      # 也可以手动点按钮触发
+  workflow_dispatch:
   push:
     branches: [master]
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+
+env:
+  # 注意：if 里不能直接用 secrets.*，必须先经 env 中转
+  SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+  KEY_STORE_PASSWORD: ${{ secrets.KEY_STORE_PASSWORD }}
+  ALIAS: ${{ secrets.ALIAS }}
+  KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+  GOOGLE_SERVICES: ${{ secrets.GOOGLE_SERVICES }}
 
 jobs:
   build:
@@ -26,18 +38,15 @@ jobs:
         with:
           packages: platform-tools
 
-      # 可选：如果配了签名 secrets，就用你自己的 keystore 签
+      # 配了签名 secrets 就用你自己的 keystore；没配则跳过，
+      # Gradle 会回退到 debug keystore 给 release 签名，APK 一样能装
       - name: Apply signing (optional)
-        if: secrets.SIGNING_KEY != ''
-        env:
-          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
-          KEY_STORE_PASSWORD: ${{ secrets.KEY_STORE_PASSWORD }}
-          ALIAS: ${{ secrets.ALIAS }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        if: env.SIGNING_KEY != ''
         run: |
-          echo "$SIGNING_KEY" | base64 -d > key.jks
+          printf '%s' "$SIGNING_KEY" | base64 -d > key.jks
           printf 'storeFile=key.jks\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n' \
             "$KEY_STORE_PASSWORD" "$ALIAS" "$KEY_PASSWORD" > signing.properties
+          if [ -n "$GOOGLE_SERVICES" ]; then printf '%s' "$GOOGLE_SERVICES" > app/google-services.json; fi
 
       - name: Build release APK
         env:
@@ -45,10 +54,13 @@ jobs:
           BUILD_VERSION: '1.0.0-myclone'
         run: ./gradlew :app:assembleRelease --stacktrace
 
+      - name: Show APK
+        run: ls -lh app/build/outputs/apk/release/
+
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: flare-apk
+          name: flare-apk-${{ github.run_number }}
           path: app/build/outputs/apk/release/*.apk
           if-no-files-found: error
           retention-days: 30

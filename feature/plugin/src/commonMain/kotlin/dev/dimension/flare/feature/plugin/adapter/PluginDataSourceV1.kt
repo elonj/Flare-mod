@@ -1,0 +1,1242 @@
+package dev.dimension.flare.feature.plugin.adapter
+
+import dev.dimension.flare.common.FileItem
+import dev.dimension.flare.data.datasource.microblog.AccountHttpCapability
+import dev.dimension.flare.data.datasource.microblog.AccountHttpRequest
+import dev.dimension.flare.data.datasource.microblog.AuthenticatedMicroblogDataSource
+import dev.dimension.flare.data.datasource.microblog.ComposeConfig
+import dev.dimension.flare.data.datasource.microblog.ComposeData
+import dev.dimension.flare.data.datasource.microblog.ComposeDataSource
+import dev.dimension.flare.data.datasource.microblog.ComposeType
+import dev.dimension.flare.data.datasource.microblog.DataSourceCapabilityProvider
+import dev.dimension.flare.data.datasource.microblog.DataSourceCapabilitySet
+import dev.dimension.flare.data.datasource.microblog.MicroblogDataSource
+import dev.dimension.flare.data.datasource.microblog.PostCapability
+import dev.dimension.flare.data.datasource.microblog.PostEvent
+import dev.dimension.flare.data.datasource.microblog.ProfileCapability
+import dev.dimension.flare.data.datasource.microblog.ProfileTab
+import dev.dimension.flare.data.datasource.microblog.SearchCapability
+import dev.dimension.flare.data.datasource.microblog.SearchOperation
+import dev.dimension.flare.data.datasource.microblog.TabCatalogCapability
+import dev.dimension.flare.data.datasource.microblog.TimelineCapability
+import dev.dimension.flare.data.datasource.microblog.datasource.PostDataSource
+import dev.dimension.flare.data.datasource.microblog.datasource.TimelinePageDataSource
+import dev.dimension.flare.data.datasource.microblog.datasource.TimelineTabConfigurationDataSource
+import dev.dimension.flare.data.datasource.microblog.datasource.UserDataSource
+import dev.dimension.flare.data.datasource.microblog.handler.PostEventHandler
+import dev.dimension.flare.data.datasource.microblog.handler.PostHandler
+import dev.dimension.flare.data.datasource.microblog.handler.RelationHandler
+import dev.dimension.flare.data.datasource.microblog.handler.UserHandler
+import dev.dimension.flare.data.datasource.microblog.intersectMimeTypeConstraints
+import dev.dimension.flare.data.datasource.microblog.loader.PostLoader
+import dev.dimension.flare.data.datasource.microblog.loader.UserLoader
+import dev.dimension.flare.data.datasource.microblog.paging.PagingRequest
+import dev.dimension.flare.data.datasource.microblog.paging.RemoteLoader
+import dev.dimension.flare.data.datasource.microblog.paging.notSupported
+import dev.dimension.flare.data.model.ProxyRef
+import dev.dimension.flare.data.model.tab.TimelineCandidate
+import dev.dimension.flare.data.model.tab.TimelineSpec
+import dev.dimension.flare.feature.plugin.abi.PluginAbiV1
+import dev.dimension.flare.feature.plugin.abi.PluginJsonV1
+import dev.dimension.flare.feature.plugin.host.PluginAsset
+import dev.dimension.flare.feature.plugin.host.PluginCallTimeoutV1
+import dev.dimension.flare.feature.plugin.host.PluginInvocationContextV1
+import dev.dimension.flare.feature.plugin.host.PluginUrlPolicy
+import dev.dimension.flare.feature.plugin.host.accountHost
+import dev.dimension.flare.feature.plugin.host.platformUuid
+import dev.dimension.flare.feature.plugin.host.validateAuthenticationHeaders
+import dev.dimension.flare.feature.plugin.lifecycle.RunningPluginV1
+import dev.dimension.flare.feature.plugin.manifest.ProfileTabManifestV1
+import dev.dimension.flare.feature.plugin.manifest.TimelineManifestV1
+import dev.dimension.flare.feature.plugin.manifest.socialPlatform
+import dev.dimension.flare.feature.plugin.manifest.toUiText
+import dev.dimension.flare.feature.plugin.runtime.PluginRuntimeKeyV1
+import dev.dimension.flare.feature.plugin.runtime.PluginRuntimePool
+import dev.dimension.flare.feature.plugin.wire.ComposeAssetV1
+import dev.dimension.flare.feature.plugin.wire.ComposeConfigV2
+import dev.dimension.flare.feature.plugin.wire.ComposePollV1
+import dev.dimension.flare.feature.plugin.wire.ComposeReferenceV2
+import dev.dimension.flare.feature.plugin.wire.ComposeRequestV2
+import dev.dimension.flare.feature.plugin.wire.ComposeResultV1
+import dev.dimension.flare.feature.plugin.wire.EntityKeyV1
+import dev.dimension.flare.feature.plugin.wire.EntityRequestV1
+import dev.dimension.flare.feature.plugin.wire.HandleRequestV1
+import dev.dimension.flare.feature.plugin.wire.HashtagV1
+import dev.dimension.flare.feature.plugin.wire.LegacyComposeRequestV1Serializer
+import dev.dimension.flare.feature.plugin.wire.MutationRequestV1
+import dev.dimension.flare.feature.plugin.wire.MutationResultV1
+import dev.dimension.flare.feature.plugin.wire.PageDirectionV1
+import dev.dimension.flare.feature.plugin.wire.PageV1
+import dev.dimension.flare.feature.plugin.wire.PostV1
+import dev.dimension.flare.feature.plugin.wire.ProfileTimelineRequestV1
+import dev.dimension.flare.feature.plugin.wire.ProfileV1
+import dev.dimension.flare.feature.plugin.wire.SearchRequestV1
+import dev.dimension.flare.feature.plugin.wire.SemanticActionV1
+import dev.dimension.flare.feature.plugin.wire.TimelineDisplayV1
+import dev.dimension.flare.feature.plugin.wire.TimelineItemV1
+import dev.dimension.flare.feature.plugin.wire.TimelinePageLoadRequestV2
+import dev.dimension.flare.feature.plugin.wire.TimelinePageRequestV1
+import dev.dimension.flare.feature.plugin.wire.USER_ACTIONS_V1
+import dev.dimension.flare.feature.plugin.wire.VisibilityV1
+import dev.dimension.flare.feature.plugin.wire.requireActionToken
+import dev.dimension.flare.feature.plugin.wire.requireDeleteResult
+import dev.dimension.flare.feature.plugin.wire.requirePostMutationResult
+import dev.dimension.flare.feature.plugin.wire.requireUserMutationResult
+import dev.dimension.flare.feature.plugin.wire.requireValid
+import dev.dimension.flare.model.AccountType
+import dev.dimension.flare.model.MicroBlogKey
+import dev.dimension.flare.model.PlatformDataSourceContext
+import dev.dimension.flare.ui.model.UiHandle
+import dev.dimension.flare.ui.model.UiHashtag
+import dev.dimension.flare.ui.model.UiProfile
+import dev.dimension.flare.ui.model.UiTimelineV2
+import dev.dimension.flare.ui.model.asType
+import dev.dimension.flare.ui.presenter.compose.ComposeStatus
+import io.ktor.http.Url
+import kotlinx.collections.immutable.ImmutableList
+import kotlinx.collections.immutable.persistentListOf
+import kotlinx.collections.immutable.toImmutableList
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.update
+import kotlinx.serialization.builtins.MapSerializer
+import kotlinx.serialization.builtins.serializer
+import kotlinx.serialization.encodeToString
+
+/** Lazy proxy: construction reads only the Host-owned credential envelope and never starts a JavaScript engine. */
+internal class PluginDataSourceV1 private constructor(
+    private val plugin: RunningPluginV1,
+    private val runtimePool: PluginRuntimePool,
+    override val authenticatedAccountKey: MicroBlogKey?,
+    private val origin: String,
+    private val capabilities: PluginSessionCapabilitiesV1,
+    private val invoker: PluginAccountInvokerV1,
+    private val mapper: PluginWireMapperV1,
+    private val timelineSpecs: Map<String, TimelineSpec<TimelineSpec.AccountResourceData>>,
+    private val dynamicTimelineSpec: TimelineSpec<PluginTimelineDataV1>?,
+    private val coroutineScope: CoroutineScope?,
+    private val cachedComposeConfig: ComposeConfigV2?,
+    private val loginProfile: ProfileV1?,
+) : MicroblogDataSource,
+    DataSourceCapabilityProvider,
+    PluginNamedTimelineDataSourceV1 {
+    override val authenticatedProfile: UiProfile?
+        get() = loginProfile?.let(mapper::cachedProfile)
+
+    private val accountKey: MicroBlogKey?
+        get() = authenticatedAccountKey
+
+    private val originHost: String = Url(origin).accountHost()
+
+    private val accountType: AccountType = accountKey?.let(AccountType::Specific) ?: AccountType.GuestHost(originHost)
+
+    internal val extraCapabilities: PluginExtraCapabilitiesV1 by lazy {
+        PluginExtraCapabilitiesV1(
+            plugin = plugin,
+            base = this,
+            invoker = invoker,
+            mapper = mapper,
+            accountKey = accountKey,
+            capabilities = capabilities,
+            coroutineScope = coroutineScope,
+            dynamicTimelineSpec = dynamicTimelineSpec,
+        )
+    }
+
+    override val searchOperations: Set<SearchOperation> =
+        SearchOperation.entries.filterTo(linkedSetOf()) {
+            capabilities.hasOperation(PluginAbiV1.Capabilities.SEARCH, it.pluginName)
+        }
+
+    private val pageRevision = MutableStateFlow(0L)
+
+    override val capabilitySet: DataSourceCapabilitySet by lazy {
+        DataSourceCapabilitySet(
+            accountHttp =
+                if (plugin.installed.manifest.apiVersion >= 2 &&
+                    capabilities.canExpose(PluginAbiV1.Capabilities.ACCOUNT_HTTP)
+                ) {
+                    AccountHttpAdapter()
+                } else {
+                    null
+                },
+            timelinePage =
+                if (plugin.installed.manifest.apiVersion >= 2 &&
+                    capabilities.canExpose(PluginAbiV1.Capabilities.TIMELINE_PAGE)
+                ) {
+                    TimelinePageAdapter()
+                } else {
+                    null
+                },
+            timeline = if (capabilities.canExpose(PluginAbiV1.Capabilities.TIMELINE)) TimelineCapability(this) else null,
+            search = if (capabilities.canExpose(PluginAbiV1.Capabilities.SEARCH)) SearchCapability(this) else null,
+            profile = if (capabilities.canExpose(PluginAbiV1.Capabilities.PROFILE)) ProfileCapability(this, userDataSource) else null,
+            post =
+                if (capabilities.canExpose(PluginAbiV1.Capabilities.POST) ||
+                    (accountKey != null && capabilities.hasOperation(PluginAbiV1.Capabilities.RELATION, "mutate"))
+                ) {
+                    PostCapability(this, postDataSource)
+                } else {
+                    null
+                },
+            compose = capabilities.composeCapability?.let(::ComposeCapabilityAdapter),
+            relation = extraCapabilities.relation,
+            notification = extraCapabilities.notification,
+            list = extraCapabilities.list,
+            directMessage = extraCapabilities.directMessage,
+            article = extraCapabilities.article,
+            gallery = extraCapabilities.gallery,
+            tabCatalog =
+                if (
+                    accountKey != null &&
+                    (capabilities.hasOperation(PluginAbiV1.Capabilities.TIMELINE, "page") || extraCapabilities.pinnableTabs != null)
+                ) {
+                    TabCatalogCapability(
+                        configuration =
+                            TabConfiguration().takeIf {
+                                capabilities.hasOperation(PluginAbiV1.Capabilities.TIMELINE, "page")
+                            },
+                        pinnable = extraCapabilities.pinnableTabs,
+                    )
+                } else {
+                    null
+                },
+        )
+    }
+
+    private val userDataSource: UserDataSource by lazy {
+        object : UserDataSource {
+            override val userHandler: UserHandler =
+                UserHandler(
+                    host = originHost,
+                    proxy = ProxyRef.forAccount(accountKey),
+                    loader =
+                        object : UserLoader {
+                            override suspend fun userByHandleAndHost(uiHandle: UiHandle): UiProfile {
+                                capabilities.requireOperation(PluginAbiV1.Capabilities.PROFILE, "byHandle")
+                                return invoker
+                                    .invoke(
+                                        capabilityId = PluginAbiV1.Capabilities.PROFILE,
+                                        operation = "byHandle",
+                                        request = HandleRequestV1(uiHandle.raw, uiHandle.normalizedHost),
+                                        requestSerializer = HandleRequestV1.serializer(),
+                                        responseSerializer = ProfileV1.serializer(),
+                                        validate = ProfileV1::requireValid,
+                                    ).let(mapper::profile)
+                            }
+
+                            override suspend fun userById(id: String): UiProfile {
+                                capabilities.requireOperation(PluginAbiV1.Capabilities.PROFILE, "byId")
+                                return invoker
+                                    .invoke(
+                                        capabilityId = PluginAbiV1.Capabilities.PROFILE,
+                                        operation = "byId",
+                                        request = EntityRequestV1(EntityKeyV1(id, originHost)),
+                                        requestSerializer = EntityRequestV1.serializer(),
+                                        responseSerializer = ProfileV1.serializer(),
+                                        validate = ProfileV1::requireValid,
+                                    ).let(mapper::profile)
+                            }
+                        },
+                )
+        }
+    }
+
+    internal val postMutationHandler: PostEventHandler.Handler by lazy {
+        object : PostEventHandler.Handler {
+            override suspend fun handle(
+                event: PostEvent,
+                updater: dev.dimension.flare.data.datasource.microblog.DatabaseUpdater,
+            ) {
+                val profileAction = event is PostEvent.PluginAction && event.profileAction
+                val request =
+                    when (event) {
+                        is PostEvent.Semantic -> {
+                            MutationRequestV1(event.postKey.toWire(), event.action.toWire(), event.actionToken)
+                        }
+
+                        is PostEvent.PluginVote -> {
+                            require(event.accountKey == accountKey) { "Vote account mismatch" }
+                            require(
+                                event.options.isNotEmpty() && event.options.size <= 100 &&
+                                    event.options.distinct().size == event.options.size &&
+                                    event.options.all { it in 0..99 },
+                            ) { "Invalid selected poll options" }
+                            MutationRequestV1(
+                                event.postKey.toWire(),
+                                SemanticActionV1.Vote,
+                                event.actionToken,
+                                mapOf("options" to PluginJsonV1.encodeToString(event.options.toList())),
+                            )
+                        }
+
+                        is PostEvent.PluginAction -> {
+                            val action = SemanticActionV1.valueOf(event.action)
+                            require(
+                                if (profileAction) {
+                                    action in USER_ACTIONS_V1
+                                } else {
+                                    action in
+                                        setOf(SemanticActionV1.React, SemanticActionV1.Unreact)
+                                },
+                            ) {
+                                "Invalid plugin action"
+                            }
+                            require(!profileAction || event.parameters.isEmpty()) { "Unexpected user action parameters" }
+                            require(profileAction || event.entityKey == event.postKey) { "Action entity mismatch" }
+                            if (!profileAction) {
+                                require(
+                                    event.parameters.keys == setOf("reaction") &&
+                                        event.parameters.getValue("reaction").let { it.isNotBlank() && it.length <= 512 },
+                                ) { "Invalid reaction" }
+                            }
+                            MutationRequestV1(event.entityKey.toWire(), action, event.actionToken, event.parameters)
+                        }
+
+                        else -> {
+                            return
+                        }
+                    }
+                request.key.requireValid()
+                request.actionToken.requireActionToken()
+                requireNotNull(accountKey) { "Actions require an account" }
+                val capability = if (profileAction) PluginAbiV1.Capabilities.RELATION else PluginAbiV1.Capabilities.POST
+                capabilities.requireOperation(capability, "mutate")
+                val result =
+                    invoker.invoke(
+                        capabilityId = capability,
+                        operation = "mutate",
+                        request = request,
+                        requestSerializer = MutationRequestV1.serializer(),
+                        responseSerializer = MutationResultV1.serializer(),
+                        validate = {
+                            if (profileAction) {
+                                it.requireUserMutationResult(
+                                    request.key,
+                                )
+                            } else {
+                                it.requirePostMutationResult(request.key)
+                            }
+                        },
+                    )
+                when (result) {
+                    is MutationResultV1.UpdatedPost -> {
+                        updater.updateCache(event.postKey) { mapper.post(result.post).post }
+                    }
+
+                    MutationResultV1.Deleted -> {
+                        updater.deleteFromCache(event.postKey)
+                        pageRevision.update { it + 1 }
+                    }
+
+                    is MutationResultV1.Invalidate -> {
+                        result.keys.forEach {
+                            updater.deleteFromCache(it.toKey())
+                            extraCapabilities.refreshGallery(it.toKey())
+                        }
+                        pageRevision.update { it + 1 }
+                    }
+
+                    is MutationResultV1.UpdatedProfile -> {
+                        val profile = mapper.profile(result.profile)
+                        userDataSource.userHandler.updateUser(profile)
+                        result.relation?.let { extraCapabilities.applyRelation(it) }
+                        updater.updateCache(event.postKey) { current ->
+                            if (current is UiTimelineV2.User) {
+                                current.copy(
+                                    value = profile,
+                                    button = mapper.userButtons(result.profile.actions, current.statusKey, profile.key),
+                                )
+                            } else {
+                                current
+                            }
+                        }
+                    }
+
+                    is MutationResultV1.UpdatedRelation -> {
+                        extraCapabilities.applyRelation(result.relation)
+                        updater.updateCache(event.postKey) { current ->
+                            if (current is UiTimelineV2.User) {
+                                current.copy(
+                                    button =
+                                        current.button
+                                            .map {
+                                                it.copy(enabled = false, clickEvent = dev.dimension.flare.ui.model.ClickEvent.Noop)
+                                            }.toImmutableList(),
+                                )
+                            } else {
+                                current
+                            }
+                        }
+                    }
+
+                    MutationResultV1.NoChange -> {}
+                }
+                if (!profileAction && result !is MutationResultV1.Invalidate) extraCapabilities.refreshGallery(event.postKey)
+            }
+        }
+    }
+
+    private val postDataSource: PostDataSource by lazy {
+        object : PostDataSource {
+            override val postHandler: PostHandler =
+                PostHandler(
+                    accountType = accountType,
+                    loader =
+                        object : PostLoader {
+                            override suspend fun status(statusKey: MicroBlogKey): UiTimelineV2 {
+                                capabilities.requireOperation(PluginAbiV1.Capabilities.POST, "detail")
+                                return invoker
+                                    .invoke(
+                                        capabilityId = PluginAbiV1.Capabilities.POST,
+                                        operation = "detail",
+                                        request = EntityRequestV1(statusKey.toWire()),
+                                        requestSerializer = EntityRequestV1.serializer(),
+                                        responseSerializer = TimelineItemV1.Post.serializer(),
+                                        validate = { it.requireValid() },
+                                    ).let { requireNotNull(mapper.timelineItem(it)) }
+                            }
+
+                            override suspend fun deleteStatus(statusKey: MicroBlogKey) {
+                                capabilities.requireOperation(PluginAbiV1.Capabilities.POST, "delete")
+                                invoker
+                                    .invoke(
+                                        capabilityId = PluginAbiV1.Capabilities.POST,
+                                        operation = "delete",
+                                        request = EntityRequestV1(statusKey.toWire()),
+                                        requestSerializer = EntityRequestV1.serializer(),
+                                        responseSerializer = MutationResultV1.serializer(),
+                                        validate = MutationResultV1::requireDeleteResult,
+                                    ).also { if (it == MutationResultV1.Deleted) pageRevision.update { revision -> revision + 1 } }
+                            }
+                        },
+                )
+            override val postEventHandler: PostEventHandler =
+                PostEventHandler(
+                    accountType,
+                    postMutationHandler,
+                )
+        }
+    }
+
+    private inner class TimelinePageAdapter : TimelinePageDataSource {
+        override val pluginId: String get() = plugin.installed.pluginId
+        override val packageHash: String get() = plugin.installed.packageHash
+        override val revision = pageRevision
+
+        override fun timelinePage(
+            pageId: String,
+            parameters: Map<String, String>,
+        ): RemoteLoader<UiTimelineV2> {
+            TimelinePageLoadRequestV2(pageId, PagingRequest.Refresh.toWire(1, parameters)).requireValid()
+            return invoker.timelineLoader(
+                capability = PluginAbiV1.Capabilities.TIMELINE_PAGE,
+                operation = "load",
+                identity = listOf(pageId) + parameters.toPagingIdentity(),
+                directions = capabilities.directions(PluginAbiV1.Capabilities.TIMELINE_PAGE, "load"),
+                collapseReplies = false,
+                load = { pageSize, request ->
+                    invoker.invoke(
+                        capabilityId = PluginAbiV1.Capabilities.TIMELINE_PAGE,
+                        operation = "load",
+                        request = TimelinePageLoadRequestV2(pageId, request.toWire(pageSize, parameters)),
+                        requestSerializer = TimelinePageLoadRequestV2.serializer(),
+                        responseSerializer = PageV1.serializer(TimelineItemV1.serializer()),
+                        validate = { page -> page.requireValid { it.requireValid() } },
+                    )
+                },
+                map = mapper::timelineItem,
+            )
+        }
+    }
+
+    override fun homeTimeline(): RemoteLoader<UiTimelineV2> {
+        val timeline =
+            plugin.installed.manifest.socialPlatform.timelines
+                .firstOrNull(TimelineManifestV1::defaultForNewAccount)
+                ?: plugin.installed.manifest.socialPlatform.timelines
+                    .firstOrNull { it.id.equals("home", ignoreCase = true) }
+                ?: plugin.installed.manifest.socialPlatform.timelines
+                    .firstOrNull()
+                ?: return notSupported()
+        return timeline(timeline.id, timeline.parameters)
+    }
+
+    override fun timeline(
+        timelineId: String,
+        parameters: Map<String, String>,
+    ): RemoteLoader<UiTimelineV2> {
+        val declared =
+            plugin.installed.manifest.socialPlatform.timelines
+                .singleOrNull { it.id == timelineId }
+        val acceptsDynamicTimeline = capabilities.hasOperation(PluginAbiV1.Capabilities.TAB_CATALOG, "page")
+        if (declared == null && !acceptsDynamicTimeline) return notSupported()
+        if (!capabilities.hasOperation(PluginAbiV1.Capabilities.TIMELINE, "page")) return notSupported()
+        val effectiveParameters = declared?.parameters.orEmpty() + parameters
+        return timelinePageLoader(
+            PluginAbiV1.Capabilities.TIMELINE,
+            "page",
+            listOf(timelineId) + effectiveParameters.toPagingIdentity(),
+        ) { pageSize, request ->
+            invoker.invoke(
+                capabilityId = PluginAbiV1.Capabilities.TIMELINE,
+                operation = "page",
+                request = TimelinePageRequestV1(timelineId, request.toWire(pageSize), effectiveParameters),
+                requestSerializer = TimelinePageRequestV1.serializer(),
+                responseSerializer = PageV1.serializer(TimelineItemV1.serializer()),
+                validate = { page -> page.requireValid { it.requireValid() } },
+            )
+        }
+    }
+
+    override fun userTimeline(
+        userKey: MicroBlogKey,
+        mediaOnly: Boolean,
+    ): RemoteLoader<UiTimelineV2> {
+        if (!capabilities.hasOperation(PluginAbiV1.Capabilities.PROFILE, "timeline")) return notSupported()
+        val manifestTab =
+            plugin.installed.manifest.socialPlatform.profileTabs.firstOrNull {
+                mediaOnly == (it.display == TimelineDisplayV1.Grid)
+            }
+        return profileTimelineLoader(userKey, manifestTab)
+    }
+
+    override fun context(statusKey: MicroBlogKey): RemoteLoader<UiTimelineV2> {
+        if (!capabilities.hasOperation(PluginAbiV1.Capabilities.POST, "context")) return notSupported()
+        return timelinePageLoader(PluginAbiV1.Capabilities.POST, "context", listOf(statusKey.id, statusKey.host)) { pageSize, request ->
+            invoker.invoke(
+                capabilityId = PluginAbiV1.Capabilities.POST,
+                operation = "context",
+                request =
+                    dev.dimension.flare.feature.plugin.wire.EntityPageRequestV1(
+                        key = statusKey.toWire(),
+                        page = request.toWire(pageSize),
+                    ),
+                requestSerializer =
+                    dev.dimension.flare.feature.plugin.wire.EntityPageRequestV1
+                        .serializer(),
+                responseSerializer = PageV1.serializer(TimelineItemV1.serializer()),
+                validate = { page -> page.requireValid { it.requireValid() } },
+            )
+        }
+    }
+
+    override fun searchStatus(query: String): RemoteLoader<UiTimelineV2> = searchPosts(SearchOperation.Posts, query)
+
+    override fun searchUser(query: String): RemoteLoader<UiProfile> = searchProfiles(SearchOperation.Profiles, query)
+
+    override fun discoverUsers(): RemoteLoader<UiProfile> = searchProfiles(SearchOperation.DiscoverProfiles, "")
+
+    override fun discoverStatuses(): RemoteLoader<UiTimelineV2> = searchPosts(SearchOperation.DiscoverPosts, "")
+
+    override fun discoverHashtags(): RemoteLoader<UiHashtag> {
+        if (SearchOperation.DiscoverHashtags !in searchOperations) return notSupported()
+        val operation = SearchOperation.DiscoverHashtags.pluginName
+        return pluginRemoteLoader(
+            directions = capabilities.directions(PluginAbiV1.Capabilities.SEARCH, operation),
+            load = { pageSize, request ->
+                invoker.invoke(
+                    capabilityId = PluginAbiV1.Capabilities.SEARCH,
+                    operation = operation,
+                    request = SearchRequestV1("", request.toWire(pageSize)),
+                    requestSerializer = SearchRequestV1.serializer(),
+                    responseSerializer = PageV1.serializer(HashtagV1.serializer()),
+                    validate = { page -> page.requireValid(HashtagV1::requireValid) },
+                )
+            },
+            map = mapper::hashtag,
+        )
+    }
+
+    override fun following(userKey: MicroBlogKey): RemoteLoader<UiProfile> = profilePage("following", userKey)
+
+    override fun fans(userKey: MicroBlogKey): RemoteLoader<UiProfile> = profilePage("followers", userKey)
+
+    override suspend fun profileTabs(userKey: MicroBlogKey): ImmutableList<ProfileTab> =
+        plugin.installed.manifest.socialPlatform.profileTabs
+            .takeIf { capabilities.hasOperation(PluginAbiV1.Capabilities.PROFILE, "timeline") }
+            .orEmpty()
+            .map { tab ->
+                ProfileTab(
+                    id = "plugin:${plugin.installed.pluginId}:${tab.id}",
+                    name = tab.title.toUiText(plugin.installed.pluginId),
+                    displayType =
+                        when (tab.display) {
+                            TimelineDisplayV1.List -> ProfileTab.DisplayType.Timeline
+                            TimelineDisplayV1.Grid -> ProfileTab.DisplayType.Gallery
+                        },
+                    loader = profileTimelineLoader(userKey, tab),
+                )
+            }.toImmutableList()
+
+    private fun profileTimelineLoader(
+        userKey: MicroBlogKey,
+        tab: ProfileTabManifestV1?,
+    ): RemoteLoader<UiTimelineV2> =
+        timelinePageLoader(
+            PluginAbiV1.Capabilities.PROFILE,
+            "timeline",
+            listOf(userKey.id, userKey.host, tab?.id.orEmpty()) + tab?.parameters.orEmpty().toPagingIdentity(),
+        ) { pageSize, request ->
+            invoker.invoke(
+                capabilityId = PluginAbiV1.Capabilities.PROFILE,
+                operation = "timeline",
+                request =
+                    ProfileTimelineRequestV1(
+                        profile = userKey.toWire(),
+                        tabId = tab?.id,
+                        page = request.toWire(pageSize),
+                        parameters = tab?.parameters.orEmpty(),
+                    ),
+                requestSerializer = ProfileTimelineRequestV1.serializer(),
+                responseSerializer = PageV1.serializer(TimelineItemV1.serializer()),
+                validate = { page -> page.requireValid { it.requireValid() } },
+            )
+        }
+
+    private fun profilePage(
+        operation: String,
+        userKey: MicroBlogKey,
+    ): RemoteLoader<UiProfile> {
+        if (!capabilities.hasOperation(PluginAbiV1.Capabilities.PROFILE, operation)) return notSupported()
+        return pluginRemoteLoader(
+            directions = capabilities.directions(PluginAbiV1.Capabilities.PROFILE, operation),
+            load = { pageSize, request ->
+                invoker.invoke(
+                    capabilityId = PluginAbiV1.Capabilities.PROFILE,
+                    operation = operation,
+                    request =
+                        dev.dimension.flare.feature.plugin.wire.EntityPageRequestV1(
+                            key = userKey.toWire(),
+                            page = request.toWire(pageSize),
+                        ),
+                    requestSerializer =
+                        dev.dimension.flare.feature.plugin.wire.EntityPageRequestV1
+                            .serializer(),
+                    responseSerializer = PageV1.serializer(ProfileV1.serializer()),
+                    validate = { page -> page.requireValid(ProfileV1::requireValid) },
+                )
+            },
+            map = mapper::profile,
+        )
+    }
+
+    private fun searchPosts(
+        searchOperation: SearchOperation,
+        query: String,
+    ): RemoteLoader<UiTimelineV2> {
+        if (searchOperation !in searchOperations) return notSupported()
+        val operation = searchOperation.pluginName
+        return timelinePageLoader(PluginAbiV1.Capabilities.SEARCH, operation, listOf(query)) { pageSize, request ->
+            invoker.invoke(
+                capabilityId = PluginAbiV1.Capabilities.SEARCH,
+                operation = operation,
+                request = SearchRequestV1(query, request.toWire(pageSize)),
+                requestSerializer = SearchRequestV1.serializer(),
+                responseSerializer = PageV1.serializer(TimelineItemV1.serializer()),
+                validate = { page -> page.requireValid { it.requireValid() } },
+            )
+        }
+    }
+
+    private fun searchProfiles(
+        searchOperation: SearchOperation,
+        query: String,
+    ): RemoteLoader<UiProfile> {
+        if (searchOperation !in searchOperations) return notSupported()
+        val operation = searchOperation.pluginName
+        return pluginRemoteLoader(
+            directions = capabilities.directions(PluginAbiV1.Capabilities.SEARCH, operation),
+            load = { pageSize, request ->
+                invoker.invoke(
+                    capabilityId = PluginAbiV1.Capabilities.SEARCH,
+                    operation = operation,
+                    request = SearchRequestV1(query, request.toWire(pageSize)),
+                    requestSerializer = SearchRequestV1.serializer(),
+                    responseSerializer = PageV1.serializer(ProfileV1.serializer()),
+                    validate = { page -> page.requireValid(ProfileV1::requireValid) },
+                )
+            },
+            map = mapper::profile,
+        )
+    }
+
+    private fun timelinePageLoader(
+        capabilityId: String,
+        operation: String,
+        identity: List<String>,
+        load: suspend (pageSize: Int, request: PagingRequest) -> PageV1<TimelineItemV1>,
+    ): RemoteLoader<UiTimelineV2> =
+        invoker.timelineLoader(
+            capabilityId,
+            operation,
+            identity,
+            capabilities.directions(capabilityId, operation),
+            load,
+            mapper::timelineItem,
+        )
+
+    private inner class AccountHttpAdapter : AccountHttpCapability {
+        override val accountOrigin = origin
+        override val authorizationRevision = "${plugin.installed.pluginId}:${plugin.installed.packageHash}:${plugin.generation}"
+        private val allowedOrigins =
+            requireNotNull(
+                plugin.installed.manifest.platform,
+            ).capabilities.getValue(PluginAbiV1.Capabilities.ACCOUNT_HTTP).authOrigins.mapTo(linkedSetOf()) {
+                if (it == PluginAbiV1.ACCOUNT_ORIGIN) origin else it
+            }
+        override val origins: Set<String> get() = if (plugin.session.isActive) allowedOrigins else emptySet()
+
+        override suspend fun ensureActive() = invoker.ensureActive()
+
+        override suspend fun <T> withAuthorization(block: suspend () -> T): T = invoker.withAuthorization(block)
+
+        override suspend fun authenticate(request: AccountHttpRequest): Map<String, String> {
+            PluginUrlPolicy.requireRequestUrl(request.url, origins)
+            return invoker.invoke(
+                capabilityId = PluginAbiV1.Capabilities.ACCOUNT_HTTP,
+                operation = "authenticate",
+                request = request,
+                requestSerializer = AccountHttpRequest.serializer(),
+                responseSerializer = MapSerializer(String.serializer(), String.serializer()),
+                validate = ::validateAuthenticationHeaders,
+            )
+        }
+    }
+
+    private inner class ComposeCapabilityAdapter(
+        private val capabilityId: String,
+    ) : ComposeDataSource,
+        AuthenticatedMicroblogDataSource by AuthenticatedDelegate() {
+        override suspend fun publish(
+            data: ComposeData,
+            progress: () -> Unit,
+        ) {
+            val config = requireNotNull(cachedComposeConfig) { "Plugin compose requires manifest defaults" }
+            require(data.type in config.supportedTypes) { "Unsupported compose type: ${data.type.name.lowercase()}" }
+            val visibility = requireNotNull(data.visibility).toWire()
+            require(capabilityId == PluginAbiV1.Capabilities.COMPOSE_V3 || !visibility.isExtended) {
+                "Extended visibility requires compose/v3"
+            }
+            val assets = linkedMapOf<String, PluginAsset>()
+            val wireAssets =
+                data.medias.map { media ->
+                    val handle = "asset_${platformUuid()}"
+                    assets[handle] = media.file.toPluginAsset()
+                    ComposeAssetV1(
+                        handle = handle,
+                        fileName = media.file.name,
+                        mimeType = media.file.mimeType,
+                        description = media.altText,
+                    )
+                }
+            validateComposeData(data, assets, config)
+            progress()
+            val result =
+                invoker.invoke(
+                    capabilityId = capabilityId,
+                    operation = "publish",
+                    request =
+                        ComposeRequestV2(
+                            text = data.content,
+                            visibility = visibility,
+                            languages = data.language,
+                            assets = wireAssets,
+                            sensitive = data.sensitive,
+                            spoilerText = data.spoilerText,
+                            reference =
+                                when (val status = data.referenceStatus?.composeStatus) {
+                                    is ComposeStatus.Reply -> ComposeReferenceV2.Reply(status.statusKey.toWire())
+                                    is ComposeStatus.Quote -> ComposeReferenceV2.Quote(status.statusKey.toWire())
+                                    null -> null
+                                },
+                            poll =
+                                data.poll?.let {
+                                    ComposePollV1(
+                                        options = it.options,
+                                        expiresInSeconds = it.expiredAfter,
+                                        multiple = it.multiple,
+                                    )
+                                },
+                        ),
+                    requestSerializer =
+                        if (capabilityId == PluginAbiV1.Capabilities.COMPOSE_V1) {
+                            LegacyComposeRequestV1Serializer
+                        } else {
+                            ComposeRequestV2.serializer()
+                        },
+                    responseSerializer = ComposeResultV1.serializer(),
+                    timeout = PluginCallTimeoutV1.Extended,
+                    assets = assets,
+                    validate = ComposeResultV1::requireValid,
+                )
+            mapper.post(result.post)
+            pageRevision.update { it + 1 }
+            progress()
+        }
+
+        override fun composeConfig(type: ComposeType): ComposeConfig = cachedComposeConfig.toHostComposeConfig()
+    }
+
+    private inner class AuthenticatedDelegate :
+        AuthenticatedMicroblogDataSource,
+        MicroblogDataSource by this@PluginDataSourceV1 {
+        override val accountKey: MicroBlogKey = requireNotNull(this@PluginDataSourceV1.accountKey)
+    }
+
+    private inner class TabConfiguration : TimelineTabConfigurationDataSource {
+        private val metadata = plugin.platformMetadata()
+
+        override val defaultTabs: ImmutableList<TimelineCandidate<*>> =
+            plugin.installed.manifest.socialPlatform.timelines
+                .filter(TimelineManifestV1::defaultForNewAccount)
+                .mapNotNull(::candidate)
+                .mapIndexed { index, candidate ->
+                    if (index == 0) candidate.copy(title = metadata.displayNameText) else candidate
+                }.toImmutableList()
+
+        override val builtInTimelineTabs: ImmutableList<TimelineCandidate<*>> =
+            plugin.installed.manifest.socialPlatform.timelines
+                .mapNotNull(::candidate)
+                .toImmutableList()
+
+        override val shortcuts: ImmutableList<dev.dimension.flare.data.model.tab.ShortcutSpec> = persistentListOf()
+
+        private fun candidate(timeline: TimelineManifestV1): TimelineCandidate<*>? {
+            val key = requireNotNull(accountKey)
+            val spec = timelineSpecs[timeline.id] ?: return null
+            val data = TimelineSpec.AccountResourceData(key, timeline.id)
+            val title = timeline.title.toUiText(plugin.installed.pluginId)
+            val icon = if (timeline.defaultForNewAccount) metadata.icon else timeline.icon.toUiIcon().asType()
+            return when (timeline.display) {
+                TimelineDisplayV1.List -> spec.candidate(data, title, icon)
+                TimelineDisplayV1.Grid -> spec.galleryCandidate(data, title, icon)
+            }
+        }
+    }
+
+    internal companion object {
+        fun authenticated(
+            plugin: RunningPluginV1,
+            runtimePool: PluginRuntimePool,
+            context: PlatformDataSourceContext,
+            timelineSpecs: Map<String, TimelineSpec<TimelineSpec.AccountResourceData>>,
+            dynamicTimelineSpec: TimelineSpec<PluginTimelineDataV1>?,
+            coroutineScope: CoroutineScope,
+        ): PluginDataSourceV1 {
+            val credentialAccess = PlatformDataSourceCredentialAccessV1(plugin, context)
+            val account = credentialAccess.initial()
+            val operations = account.effectiveCapabilities(plugin)
+            val platform = plugin.installed.manifest.socialPlatform
+            val composeConfig =
+                try {
+                    if ("publish" in operations[PluginAbiV1.Capabilities.COMPOSE_V3].orEmpty()) {
+                        mergePluginComposeConfigV2(
+                            platform.composeDefaultsV3,
+                            account.snapshot.composeConfigV3,
+                            allowExtendedVisibility = true,
+                        )
+                    } else {
+                        account.composeConfig(plugin)
+                    }
+                } catch (error: IllegalArgumentException) {
+                    if (!account.needsCapabilityNegotiation(plugin)) throw error
+                    null
+                }
+            val runtimeKey =
+                PluginRuntimeKeyV1.account(
+                    plugin.installed.pluginId,
+                    plugin.installed.packageHash,
+                    account.snapshot.origin,
+                    account.snapshot.accountId,
+                    epoch = account.sessionEpoch.takeIf { plugin.installed.manifest.apiVersion >= 2 },
+                )
+            val invoker =
+                PluginAccountInvokerV1(
+                    plugin = plugin,
+                    runtimePool = runtimePool,
+                    runtimeKey = runtimeKey,
+                    accountKey = context.accountKey,
+                    context = { locale, assets ->
+                        plugin.accountInvocationContext(credentialAccess.current(), locale, credentialAccess, assets)
+                    },
+                )
+            return create(
+                plugin = plugin,
+                runtimePool = runtimePool,
+                accountKey = context.accountKey,
+                origin = account.snapshot.origin,
+                operations =
+                    if (composeConfig == null) {
+                        operations -
+                            setOf(
+                                PluginAbiV1.Capabilities.COMPOSE_V1,
+                                PluginAbiV1.Capabilities.COMPOSE,
+                                PluginAbiV1.Capabilities.COMPOSE_V3,
+                            )
+                    } else {
+                        operations
+                    },
+                invoker = invoker,
+                timelineSpecs = timelineSpecs,
+                dynamicTimelineSpec = dynamicTimelineSpec,
+                coroutineScope = coroutineScope,
+                composeConfig = composeConfig,
+                loginProfile = account.snapshot.profile,
+            )
+        }
+
+        fun guest(
+            plugin: RunningPluginV1,
+            runtimePool: PluginRuntimePool,
+            origin: String,
+            locale: String,
+            timelineSpecs: Map<String, TimelineSpec<TimelineSpec.AccountResourceData>>,
+            dynamicTimelineSpec: TimelineSpec<PluginTimelineDataV1>?,
+        ): PluginDataSourceV1 {
+            require(
+                plugin.installed.manifest.socialPlatform.guest
+                    ?.enabled == true,
+            ) { "Plugin guest access is unavailable" }
+            val canonicalOrigin = PluginUrlPolicy.requireOrigin(origin)
+            val runtimeKey =
+                PluginRuntimeKeyV1.guest(
+                    plugin.installed.pluginId,
+                    plugin.installed.packageHash,
+                    canonicalOrigin,
+                )
+            val invoker =
+                PluginAccountInvokerV1(
+                    plugin = plugin,
+                    runtimePool = runtimePool,
+                    runtimeKey = runtimeKey,
+                    accountKey = null,
+                    context = { invocationLocale, _ ->
+                        PluginInvocationContextV1.guest(
+                            pluginId = plugin.installed.pluginId,
+                            platformId = plugin.installed.manifest.socialPlatform.id,
+                            packageHash = plugin.installed.packageHash,
+                            origin = canonicalOrigin,
+                            locale = invocationLocale.ifBlank { locale },
+                            httpOrigins = plugin.installed.manifest.permissions.httpOrigins,
+                        )
+                    },
+                )
+            return create(
+                plugin = plugin,
+                runtimePool = runtimePool,
+                accountKey = null,
+                origin = canonicalOrigin,
+                operations =
+                    plugin.installed.manifest.socialPlatform.capabilities
+                        .mapValues { it.value.operations.keys },
+                invoker = invoker,
+                timelineSpecs = timelineSpecs,
+                dynamicTimelineSpec = dynamicTimelineSpec,
+                coroutineScope = null,
+                composeConfig = null,
+                loginProfile = null,
+            )
+        }
+
+        private fun create(
+            plugin: RunningPluginV1,
+            runtimePool: PluginRuntimePool,
+            accountKey: MicroBlogKey?,
+            origin: String,
+            operations: Map<String, Set<String>>,
+            invoker: PluginAccountInvokerV1,
+            timelineSpecs: Map<String, TimelineSpec<TimelineSpec.AccountResourceData>>,
+            dynamicTimelineSpec: TimelineSpec<PluginTimelineDataV1>?,
+            coroutineScope: CoroutineScope?,
+            composeConfig: ComposeConfigV2?,
+            loginProfile: ProfileV1?,
+        ): PluginDataSourceV1 {
+            val capabilities =
+                PluginSessionCapabilitiesV1(
+                    plugin.installed.manifest.socialPlatform.capabilities,
+                    operations,
+                    accountKey != null,
+                )
+            return PluginDataSourceV1(
+                plugin = plugin,
+                runtimePool = runtimePool,
+                authenticatedAccountKey = accountKey,
+                origin = origin,
+                capabilities = capabilities,
+                invoker = invoker,
+                mapper =
+                    PluginWireMapperV1(
+                        pluginId = plugin.installed.pluginId,
+                        packageHash = plugin.installed.packageHash,
+                        platformIcon = plugin.platformMetadata().icon,
+                        platformId = plugin.installed.manifest.socialPlatform.id,
+                        accountKey = accountKey,
+                        mediaNetwork = plugin.installed.manifest.permissions.mediaNetwork,
+                        originHost = Url(origin).accountHost(),
+                        capabilities = capabilities,
+                        supportedComposeTypes = composeConfig?.supportedTypes.orEmpty(),
+                    ),
+                timelineSpecs = timelineSpecs,
+                dynamicTimelineSpec = dynamicTimelineSpec,
+                coroutineScope = coroutineScope,
+                cachedComposeConfig = composeConfig,
+                loginProfile = loginProfile,
+            )
+        }
+    }
+}
+
+internal interface PluginNamedTimelineDataSourceV1 {
+    fun timeline(
+        timelineId: String,
+        parameters: Map<String, String> = emptyMap(),
+    ): RemoteLoader<UiTimelineV2>
+}
+
+private val SearchOperation.pluginName: String
+    get() =
+        when (this) {
+            SearchOperation.Posts -> "posts"
+            SearchOperation.Profiles -> "profiles"
+            SearchOperation.DiscoverPosts -> "discoverPosts"
+            SearchOperation.DiscoverProfiles -> "discoverProfiles"
+            SearchOperation.DiscoverHashtags -> "discoverHashtags"
+        }
+
+private fun MicroBlogKey.toWire(): EntityKeyV1 = EntityKeyV1(id, host)
+
+private fun EntityKeyV1.toKey(): MicroBlogKey = MicroBlogKey(id, host)
+
+private fun dev.dimension.flare.data.datasource.microblog.SemanticPostAction.toWire(): SemanticActionV1 =
+    when (this) {
+        dev.dimension.flare.data.datasource.microblog.SemanticPostAction.Favourite -> SemanticActionV1.Favourite
+        dev.dimension.flare.data.datasource.microblog.SemanticPostAction.Unfavourite -> SemanticActionV1.Unfavourite
+        dev.dimension.flare.data.datasource.microblog.SemanticPostAction.Repost -> SemanticActionV1.Repost
+        dev.dimension.flare.data.datasource.microblog.SemanticPostAction.Unrepost -> SemanticActionV1.Unrepost
+        dev.dimension.flare.data.datasource.microblog.SemanticPostAction.Bookmark -> SemanticActionV1.Bookmark
+        dev.dimension.flare.data.datasource.microblog.SemanticPostAction.Unbookmark -> SemanticActionV1.Unbookmark
+    }
+
+private suspend fun FileItem.toPluginAsset(): PluginAsset {
+    val item = uploadMedia()
+    return object : PluginAsset {
+        override val size: Long = item.size
+        override val fileName: String? = item.name
+        override val mimeType: String? = item.mimeType
+
+        override fun openSource(): okio.Source = item.openSource()
+    }
+}
+
+private fun UiTimelineV2.Post.Visibility.toWire(): VisibilityV1 =
+    when (this) {
+        UiTimelineV2.Post.Visibility.Public -> VisibilityV1.Public
+        UiTimelineV2.Post.Visibility.Home -> VisibilityV1.Unlisted
+        UiTimelineV2.Post.Visibility.Followers -> VisibilityV1.Followers
+        UiTimelineV2.Post.Visibility.Specified -> VisibilityV1.Direct
+        UiTimelineV2.Post.Visibility.Channel -> VisibilityV1.Channel
+        UiTimelineV2.Post.Visibility.Friends -> VisibilityV1.Friends
+        UiTimelineV2.Post.Visibility.SelfOnly -> VisibilityV1.SelfOnly
+    }
+
+internal fun VisibilityV1.toHost(): UiTimelineV2.Post.Visibility =
+    when (this) {
+        VisibilityV1.Public -> UiTimelineV2.Post.Visibility.Public
+        VisibilityV1.Unlisted -> UiTimelineV2.Post.Visibility.Home
+        VisibilityV1.Followers -> UiTimelineV2.Post.Visibility.Followers
+        VisibilityV1.Direct -> UiTimelineV2.Post.Visibility.Specified
+        VisibilityV1.Channel -> UiTimelineV2.Post.Visibility.Channel
+        VisibilityV1.Friends -> UiTimelineV2.Post.Visibility.Friends
+        VisibilityV1.SelfOnly -> UiTimelineV2.Post.Visibility.SelfOnly
+    }
+
+private fun ComposeConfigV2?.toHostComposeConfig(): ComposeConfig {
+    val config = this ?: return ComposeConfig(supportedTypes = emptySet())
+    return ComposeConfig(
+        supportedTypes = config.supportedTypes,
+        text = config.text?.let { ComposeConfig.Text(it.maxLength) },
+        media =
+            config.media?.let {
+                ComposeConfig.Media(
+                    maxCount = it.maxCount,
+                    canSensitive = it.canSensitive,
+                    altTextMaxLength = it.altTextMaxLength,
+                    allowMediaOnly = true,
+                    minCountForNew = it.minCountForNew,
+                    supportedMimeTypes = it.supportedMimeTypes.takeIf(Set<String>::isNotEmpty),
+                    compression = ComposeConfig.Media.Compression(maxSizeBytes = it.maxBytes),
+                )
+            },
+        poll = config.poll?.let { ComposeConfig.Poll(it.maxOptions) },
+        contentWarning = ComposeConfig.ContentWarning.takeIf { config.contentWarning },
+        visibility =
+            config.visibility?.let {
+                ComposeConfig.Visibility(
+                    allVisibilities = it.allowed.map(VisibilityV1::toHost).toImmutableList(),
+                    defaultVisibility = it.default.toHost(),
+                )
+            },
+        language = config.language?.let { ComposeConfig.Language(it.maxCount) },
+    )
+}
+
+internal fun mergePluginComposeConfigV2(
+    manifest: ComposeConfigV2?,
+    instance: ComposeConfigV2?,
+    allowExtendedVisibility: Boolean = false,
+    requireModeOverlap: Boolean = true,
+): ComposeConfigV2? {
+    manifest?.requireValid(allowExtendedVisibility)
+    instance?.requireValid(allowExtendedVisibility)
+    if (manifest == null) return instance
+    if (instance == null) return manifest
+    val supportedTypes = manifest.supportedTypes intersect instance.supportedTypes
+    require(!requireModeOverlap || supportedTypes.isNotEmpty()) { "Plugin compose supportedTypes do not overlap" }
+    val media =
+        when {
+            manifest.media == null -> {
+                instance.media
+            }
+
+            instance.media == null -> {
+                manifest.media
+            }
+
+            else -> {
+                val minCountForNew = maxOf(manifest.media.minCountForNew, instance.media.minCountForNew)
+                val maxCount = minOf(manifest.media.maxCount, instance.media.maxCount)
+                require(minCountForNew <= maxCount) { "Plugin compose media constraints do not overlap" }
+                ComposeConfigV2.MediaConfigV1(
+                    minCountForNew = minCountForNew,
+                    maxCount = maxCount,
+                    maxBytes = minOf(manifest.media.maxBytes, instance.media.maxBytes),
+                    supportedMimeTypes =
+                        intersectMimeTypeConstraints(
+                            manifest.media.supportedMimeTypes.takeIf(Set<String>::isNotEmpty),
+                            instance.media.supportedMimeTypes.takeIf(Set<String>::isNotEmpty),
+                        )?.also { require(it.isNotEmpty()) { "Plugin compose MIME constraints do not overlap" } }.orEmpty(),
+                    altTextMaxLength = minOf(manifest.media.altTextMaxLength, instance.media.altTextMaxLength),
+                    canSensitive = manifest.media.canSensitive && instance.media.canSensitive,
+                )
+            }
+        }
+    val visibility =
+        when {
+            manifest.visibility == null -> {
+                instance.visibility
+            }
+
+            instance.visibility == null -> {
+                manifest.visibility
+            }
+
+            else -> {
+                val allowed = manifest.visibility.allowed intersect instance.visibility.allowed
+                require(allowed.isNotEmpty()) { "Plugin compose visibility constraints do not overlap" }
+                ComposeConfigV2.VisibilityConfigV1(
+                    allowed = allowed,
+                    default =
+                        manifest.visibility.default.takeIf(allowed::contains)
+                            ?: instance.visibility.default.takeIf(allowed::contains)
+                            ?: allowed.first(),
+                )
+            }
+        }
+    return ComposeConfigV2(
+        supportedTypes = supportedTypes,
+        text =
+            when {
+                manifest.text == null -> instance.text
+                instance.text == null -> manifest.text
+                else -> ComposeConfigV2.TextConfigV1(minOf(manifest.text.maxLength, instance.text.maxLength))
+            },
+        media = media,
+        visibility = visibility,
+        contentWarning = manifest.contentWarning && instance.contentWarning,
+        poll =
+            when {
+                manifest.poll == null -> instance.poll
+                instance.poll == null -> manifest.poll
+                else -> ComposeConfigV2.PollConfigV1(minOf(manifest.poll.maxOptions, instance.poll.maxOptions))
+            },
+        language =
+            when {
+                manifest.language == null -> instance.language
+                instance.language == null -> manifest.language
+                else -> ComposeConfigV2.LanguageConfigV1(minOf(manifest.language.maxCount, instance.language.maxCount))
+            },
+    ).also { it.requireValid(allowExtendedVisibility, requireSupportedTypes = requireModeOverlap) }
+}
+
+private fun validateComposeData(
+    data: ComposeData,
+    assets: Map<String, PluginAsset>,
+    config: ComposeConfigV2,
+) {
+    data.referenceStatus
+        ?.composeStatus
+        ?.statusKey
+        ?.let { EntityKeyV1(it.id, it.host).requireValid() }
+    require(data.localOnly.not()) { "Plugin compose does not support local-only posts" }
+    require(data.language.size <= 32 && data.language.all { it.length in 1..64 }) { "Invalid compose languages" }
+    val poll = data.poll
+    require((poll == null) || (poll.options.size in 2..100)) { "Invalid compose poll" }
+    require(data.content.isNotBlank() || assets.isNotEmpty()) { "Compose requires text or media" }
+
+    config.text?.let { require(data.content.length <= it.maxLength) { "Compose text is too long" } }
+    config.visibility?.let { require(requireNotNull(data.visibility).toWire() in it.allowed) { "Compose visibility is not allowed" } }
+    require(config.contentWarning || (data.spoilerText.isNullOrEmpty())) { "Content warnings are not supported" }
+    config.poll?.let { require((poll == null) || (poll.options.size <= it.maxOptions)) { "Too many poll options" } }
+    require((config.poll != null) || (poll == null)) { "Polls are not supported" }
+    config.language?.let { require(data.language.size <= it.maxCount) { "Too many compose languages" } }
+
+    val media = config.media
+    require((media != null) || assets.isEmpty()) { "Media is not supported" }
+    media ?: return
+    val minimum = if (data.type == ComposeType.Reply) 0 else media.minCountForNew
+    require(assets.size in minimum..media.maxCount) { "Invalid compose media count" }
+    require(media.canSensitive || (!data.sensitive)) { "Sensitive media is not supported" }
+    val supported = media.supportedMimeTypes.mapTo(linkedSetOf(), String::lowercase)
+    data.medias.zip(assets.values).forEach { (item, asset) ->
+        require(asset.size <= media.maxBytes) { "Compose media is too large" }
+        val altText = item.altText
+        require((altText == null) || (altText.length <= media.altTextMaxLength)) { "Media description is too long" }
+        val mimeType =
+            asset.mimeType
+                ?.substringBefore(';')
+                ?.trim()
+                ?.lowercase()
+        require(supported.isEmpty() || ((mimeType != null) && supported.any { it.matchesMimeType(mimeType) })) {
+            "Compose media type is not supported"
+        }
+    }
+}
+
+private fun String.matchesMimeType(actual: String): Boolean = (this == actual) || (endsWith("/*") && actual.startsWith(removeSuffix("*")))
+
+internal fun dev.dimension.flare.feature.plugin.wire.HostIconV1.toUiIcon(): dev.dimension.flare.ui.model.UiIcon =
+    when (this) {
+        dev.dimension.flare.feature.plugin.wire.HostIconV1.Home -> dev.dimension.flare.ui.model.UiIcon.Home
+        dev.dimension.flare.feature.plugin.wire.HostIconV1.Notification -> dev.dimension.flare.ui.model.UiIcon.Notification
+        dev.dimension.flare.feature.plugin.wire.HostIconV1.Search -> dev.dimension.flare.ui.model.UiIcon.Search
+        dev.dimension.flare.feature.plugin.wire.HostIconV1.Profile -> dev.dimension.flare.ui.model.UiIcon.Profile
+        dev.dimension.flare.feature.plugin.wire.HostIconV1.Local -> dev.dimension.flare.ui.model.UiIcon.Local
+        dev.dimension.flare.feature.plugin.wire.HostIconV1.World -> dev.dimension.flare.ui.model.UiIcon.World
+        dev.dimension.flare.feature.plugin.wire.HostIconV1.Featured -> dev.dimension.flare.ui.model.UiIcon.Featured
+        dev.dimension.flare.feature.plugin.wire.HostIconV1.Bookmark -> dev.dimension.flare.ui.model.UiIcon.Bookmark
+        dev.dimension.flare.feature.plugin.wire.HostIconV1.Heart -> dev.dimension.flare.ui.model.UiIcon.Heart
+        dev.dimension.flare.feature.plugin.wire.HostIconV1.List -> dev.dimension.flare.ui.model.UiIcon.List
+        dev.dimension.flare.feature.plugin.wire.HostIconV1.Messages -> dev.dimension.flare.ui.model.UiIcon.Messages
+        dev.dimension.flare.feature.plugin.wire.HostIconV1.Channel -> dev.dimension.flare.ui.model.UiIcon.Channel
+        dev.dimension.flare.feature.plugin.wire.HostIconV1.Like -> dev.dimension.flare.ui.model.UiIcon.Like
+        dev.dimension.flare.feature.plugin.wire.HostIconV1.Repost -> dev.dimension.flare.ui.model.UiIcon.Retweet
+        dev.dimension.flare.feature.plugin.wire.HostIconV1.Reply -> dev.dimension.flare.ui.model.UiIcon.Reply
+        dev.dimension.flare.feature.plugin.wire.HostIconV1.Delete -> dev.dimension.flare.ui.model.UiIcon.Delete
+        dev.dimension.flare.feature.plugin.wire.HostIconV1.Follow -> dev.dimension.flare.ui.model.UiIcon.Follow
+        dev.dimension.flare.feature.plugin.wire.HostIconV1.Block -> dev.dimension.flare.ui.model.UiIcon.Block
+        dev.dimension.flare.feature.plugin.wire.HostIconV1.Mute -> dev.dimension.flare.ui.model.UiIcon.Mute
+        dev.dimension.flare.feature.plugin.wire.HostIconV1.Info -> dev.dimension.flare.ui.model.UiIcon.Info
+    }
+
+private fun Map<String, String>.toPagingIdentity(): List<String> = entries.sortedBy { it.key }.flatMap { listOf(it.key, it.value) }

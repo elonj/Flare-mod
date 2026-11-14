@@ -90,6 +90,8 @@ public class SettingsPresenter : PresenterBase<SettingsPresenter.State>() {
 
             override fun updateExpandMediaSize(value: Boolean) = update(AppearanceKeys.ExpandMediaSize, value)
 
+            override fun updateLimitSingleMediaHeight(value: Boolean) = update(AppearanceKeys.LimitSingleMediaHeight, value)
+
             override fun updateMediaLayout(value: TimelineMediaLayout) = update(AppearanceKeys.MediaLayout, value)
 
             override fun updateLimitMediaGridToNine(value: Boolean) = update(AppearanceKeys.LimitMediaGridToNine, value)
@@ -115,6 +117,10 @@ public class SettingsPresenter : PresenterBase<SettingsPresenter.State>() {
             override fun updatePostActionFixedWidth(value: Boolean) = update(AppearanceKeys.PostActionFixedWidth, value)
 
             override fun updateShowNumbers(value: Boolean) = update(AppearanceKeys.ShowNumbers, value)
+
+            override fun updateRememberHomeTimelinePosition(value: Boolean) {
+                updateAppSettings { copy(rememberHomeTimelinePosition = value) }
+            }
 
             override fun updateRefreshHomeTimelineOnLaunch(value: Boolean) {
                 updateAppSettings {
@@ -178,6 +184,8 @@ public class SettingsPresenter : PresenterBase<SettingsPresenter.State>() {
 
         public fun updateExpandMediaSize(value: Boolean)
 
+        public fun updateLimitSingleMediaHeight(value: Boolean)
+
         public fun updateMediaLayout(value: TimelineMediaLayout)
 
         public fun updateLimitMediaGridToNine(value: Boolean)
@@ -203,6 +211,8 @@ public class SettingsPresenter : PresenterBase<SettingsPresenter.State>() {
         public fun updatePostActionFixedWidth(value: Boolean)
 
         public fun updateShowNumbers(value: Boolean)
+
+        public fun updateRememberHomeTimelinePosition(value: Boolean)
 
         public fun updateRefreshHomeTimelineOnLaunch(value: Boolean)
 

@@ -11,12 +11,15 @@ enum MacWindowID {
     static let compose = "compose"
     static let media = "media"
     static let rssManagement = "rss-management"
+    static let pluginMarketplace = "plugin-marketplace"
     static let agentHistory = "agent-history"
     static let directMessages = "direct-messages"
 }
 
 @main
 struct FlareApp: App {
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var selectedSettingsPane: MacSettingsPane = .accountManagement
     init() {
         configureKingfisherCache()
 
@@ -24,6 +27,7 @@ struct FlareApp: App {
         if firebaseEnabled {
             AppleSharedHelper.shared.setupCrashlytics()
         }
+        ProxySessionConfigurator.install()
         AppleSharedHelper.shared.initialize(
             inAppNotification: SwiftInAppNotification.shared,
             swiftFormatter: Formatter.shared,
@@ -39,6 +43,9 @@ struct FlareApp: App {
             }
         }
         .defaultSize(width: 480, height: 600)
+        .onChange(of: scenePhase, initial: true) { _, phase in
+            PluginRuntimeLifecycleFacadeV1().setForeground(active: phase == .active)
+        }
         .windowResizability(.contentSize)
         .windowSizeFitContent()
         .commands {
@@ -95,9 +102,24 @@ struct FlareApp: App {
         .windowToolbarStyle(.unified)
         .disableRestorationBehavior()
 
+        Window("plugin_marketplace", id: MacWindowID.pluginMarketplace) {
+            FlareTheme {
+                NavigationStack {
+                    PluginManagementView(
+                        marketplace: true,
+                        onSelectPluginSettings: { selectedSettingsPane = .plugins },
+                        onCreateWithAI: {}
+                    )
+                }
+            }
+        }
+        .defaultSize(width: 720, height: 520)
+        .windowToolbarStyle(.unified)
+        .disableRestorationBehavior()
+
         Settings {
             FlareTheme {
-                MacSettingsScreen()
+                MacSettingsScreen(selectedPane: $selectedSettingsPane)
             }
         }
         .windowToolbarStyle(.expanded)
@@ -116,6 +138,15 @@ private func configureKingfisherCache() {
     let memoryLimit = min(max(scaledLimit, minimumLimit), maximumLimit)
 
     KingfisherManager.shared.cache.memoryStorage.config.totalCostLimit = Int(memoryLimit)
+    let ordinaryRetention: TimeInterval
+    switch KingfisherManager.shared.cache.diskStorage.config.expiration {
+    case .days(let days): ordinaryRetention = TimeInterval(days) * 24 * 60 * 60
+    case .seconds(let seconds): ordinaryRetention = seconds
+    case .date(let date): ordinaryRetention = date.timeIntervalSinceNow
+    default: ordinaryRetention = 14 * 24 * 60 * 60
+    }
+    ImageTranslationCachePolicy.shared.configure(ordinaryRetentionSeconds: ordinaryRetention)
+
 }
 
 extension Scene {
@@ -240,7 +271,7 @@ private struct MacAppCommands: Commands {
                         Button {
                             openMainWindow(route: .accountNotification(item.profile.key))
                         } label: {
-                            Text(verbatim: item.profile.handle.canonical)
+                            Text(verbatim: item.profile.handle.display)
                         }
                     }
                 }
@@ -295,8 +326,7 @@ private struct MacAppCommands: Commands {
                                 } icon: {
                                     if let avatar = data.data.avatar {
                                         AvatarView(
-                                            data: avatar.url,
-                                            customHeader: avatar.customHeaders
+                                            data: avatar
                                         )
                                         .frame(width: 16, height: 16)
                                         .clipShape(Circle())
@@ -374,7 +404,7 @@ private struct MacAppCommands: Commands {
 
     private func accountTitle(_ profile: UiProfile) -> String {
         let name = profile.name.raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        return name.isEmpty ? profile.handle.canonical : "\(name) (\(profile.handle.canonical))"
+        return name.isEmpty ? profile.handle.display : "\(name) (\(profile.handle.display))"
     }
 }
 

@@ -70,7 +70,10 @@ internal fun UiTimelineV2.applyTranslation(
     val translation =
         translations.firstOrNull {
             it.targetLanguage == Locale.language &&
-                it.sourceHash == payload.sourceHash(cacheKey)
+                (
+                    it.sourceHash == payload.sourceHash(options.providerCacheKey) ||
+                        (options.preferPlatformTranslation && it.matchesPlatformTranslation(payload, cacheKey))
+                )
         }
 
     return when (this) {
@@ -116,6 +119,7 @@ internal fun UiTimelineV2.applyTranslation(
                         }
                 val displayState =
                     when {
+                        displayMode == TranslationDisplayMode.Original -> TranslationDisplayState.Hidden
                         translation?.status == TranslationStatus.Completed && shouldShowTranslated -> TranslationDisplayState.Translated
                         translation?.status == TranslationStatus.Completed -> TranslationDisplayState.Hidden
                         else -> translation.toDisplayState()
@@ -183,7 +187,7 @@ internal fun UiTimelineV2.applyTranslation(
             }
         }
 
-        is UiTimelineV2.Message -> {
+        is UiTimelineV2.Gap, is UiTimelineV2.Message -> {
             this
         }
 
@@ -322,7 +326,7 @@ internal fun UiTimelineV2.translationPayload(): TranslationPayload? =
             displayPost.translationPayload()
         }
 
-        is UiTimelineV2.Message -> {
+        is UiTimelineV2.Gap, is UiTimelineV2.Message -> {
             null
         }
 
@@ -370,9 +374,20 @@ internal fun UiTimelineV2.effectiveTranslationCacheKey(
         return providerCacheKey
     }
     val post = platformPostOrNull() ?: return providerCacheKey
-    val platformPayload = post.platformTranslationPayloadOrNull() ?: return providerCacheKey
-    val payloadHash = platformPayload.encodeJson(TranslationPayload.serializer()).stableTranslationHash()
-    return "platform:${post.platformId}:$payloadHash"
+    return "platform:${post.platformId}"
+}
+
+internal fun DbTranslation.matchesPlatformTranslation(
+    source: TranslationPayload,
+    platformCacheKey: String,
+): Boolean {
+    if (sourceHash == source.sourceHash(platformCacheKey)) {
+        return true
+    }
+    // Legacy keys included the translated payload; validate them against the current original.
+    val translated = payload ?: return false
+    val payloadHash = translated.encodeJson(TranslationPayload.serializer()).stableTranslationHash()
+    return sourceHash == source.sourceHash("$platformCacheKey:$payloadHash")
 }
 
 private fun DbTranslation?.toDisplayState(): TranslationDisplayState =

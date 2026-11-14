@@ -23,13 +23,18 @@ internal class AgentConversationTitleGenerator(
                     "${message.first.name}: ${message.second.take(MAX_MESSAGE_CHARS)}"
                 }.takeIf { it.isNotBlank() }
                 ?: return null
-        val runtime = runtimeProvider.createRuntime() ?: return null
+        val runtime =
+            try {
+                runtimeProvider.createRuntime() ?: return null
+            } catch (_: AgentConfigurationException) {
+                return null
+            }
         return try {
             runtime
                 .promptExecutor
                 .execute(
                     prompt =
-                        Prompt.build("agent-conversation-title") {
+                        Prompt.build("agent-conversation-title", params = runtime.params) {
                             system {
                                 text(
                                     """

@@ -2,6 +2,8 @@ import SwiftUI
 import KotlinSharedUI
 import FlareAppleCore
 import FlareAppleUI
+import AVFAudio
+import UIKit
 
 @main
 struct FlareApp: App {
@@ -14,6 +16,7 @@ struct FlareApp: App {
         if firebaseEnabled {
             AppleSharedHelper.shared.setupCrashlytics()
         }
+        ProxySessionConfigurator.install()
         AppleSharedHelper.shared.initialize(
             inAppNotification: SwiftInAppNotification.shared,
             swiftFormatter: Formatter.shared,
@@ -28,8 +31,20 @@ struct FlareApp: App {
             }
             .modifier(IOSTimelineListEnvironment())
         .ugoiraExportStatus()
-            .onChange(of: scenePhase) { _, phase in
+            .onChange(of: scenePhase, initial: true) { _, phase in
                 MediaCacheMaintenance.handleScenePhase(phase)
+                PluginRuntimeLifecycleFacadeV1().setForeground(active: phase == .active)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UIApplication.didEnterBackgroundNotification)) { _ in
+                MediaProxy.shared.setRelayForeground(active: false)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
+                MediaProxy.shared.setRelayForeground(active: true)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)) { _ in
+                Task.detached {
+                    try? await PluginRuntimeLifecycleFacadeV1().onMemoryPressure()
+                }
             }
         }
     }
@@ -39,6 +54,8 @@ struct FlareApp: App {
         #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("--media-viewer-test") {
             MediaViewerTestFixture()
+        } else if ProcessInfo.processInfo.arguments.contains("--timeline-media-scroll-test") {
+            TimelineMediaScrollTestFixture()
         } else {
             appRoot
         }

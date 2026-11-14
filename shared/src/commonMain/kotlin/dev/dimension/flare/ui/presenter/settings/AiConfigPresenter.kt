@@ -12,9 +12,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import dev.dimension.flare.common.OnDeviceAI
 import dev.dimension.flare.data.datastore.AppDataStore
+import dev.dimension.flare.data.datastore.model.AgentOpenAIApi
 import dev.dimension.flare.data.datastore.model.AppSettings
 import dev.dimension.flare.data.network.ai.OpenAIService
+import dev.dimension.flare.data.translation.PluginTranslationProvider
 import dev.dimension.flare.data.translation.canonicalTranslationLanguage
+import dev.dimension.flare.data.translation.pluginTranslationServiceOrNull
 import dev.dimension.flare.di.koinInject
 import dev.dimension.flare.ui.model.UiState
 import dev.dimension.flare.ui.presenter.PresenterBase
@@ -25,6 +28,7 @@ import kotlinx.collections.immutable.persistentListOf
 import kotlinx.collections.immutable.toImmutableList
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -41,12 +45,17 @@ public enum class AiReasoningEffortOption(
     public val value: String,
 ) {
     Default(""),
+    None("none"),
+    Minimal("minimal"),
     Low("low"),
     Medium("medium"),
     High("high"),
+    XHigh("xhigh"),
+    Max("max"),
 }
 
 public enum class TranslateProviderOption {
+    Plugin,
     AI,
     GoogleWeb,
     DeepL,
@@ -55,19 +64,36 @@ public enum class TranslateProviderOption {
 }
 
 @WebPresenter("aiConfig")
-public class AiConfigPresenter : PresenterBase<AiConfigPresenter.State>() {
+public class AiConfigPresenter(
+    private val agentConfig: Boolean = false,
+) : PresenterBase<AiConfigPresenter.State>() {
     private val appDataStore by koinInject<AppDataStore>()
     private val openAIService by koinInject<OpenAIService>()
     private val onDeviceAI by koinInject<OnDeviceAI>()
 
     @Immutable
     public interface State {
+        public val isAgentConfig: Boolean
+        public val useSharedConfig: Boolean
+        public val agentOpenAIApi: AgentOpenAIApi
+        public val supportedAgentOpenAIApis: ImmutableList<AgentOpenAIApi>
         public val aiType: AiTypeOption
         public val openAIServerUrl: String
         public val openAIApiKey: String
         public val openAIModel: String
         public val openAIReasoningEffort: AiReasoningEffortOption
+        public val openAIContextWindow: String
         public val openAIExtraBody: String
+
+        @WebIgnore
+        public val pluginTranslateProviders: List<PluginTranslationProvider> get() = emptyList()
+
+        @WebIgnore
+        public val selectedTranslationPluginId: String? get() = null
+
+        @WebIgnore
+        public fun selectTranslationPlugin(pluginId: String) {}
+
         public val translateProvider: TranslateProviderOption
         public val deepLApiKey: String
         public val deepLUsePro: Boolean
@@ -88,6 +114,10 @@ public class AiConfigPresenter : PresenterBase<AiConfigPresenter.State>() {
         public val showOriginalWithTranslation: Boolean
         public val autoTranslateExcludedLanguages: ImmutableList<String>
 
+        public fun setUseSharedConfig(value: Boolean)
+
+        public fun setAgentOpenAIApi(value: AgentOpenAIApi)
+
         public fun selectType(type: AiTypeOption)
 
         public fun selectTranslateProvider(type: TranslateProviderOption)
@@ -103,6 +133,10 @@ public class AiConfigPresenter : PresenterBase<AiConfigPresenter.State>() {
         public fun setOpenAIModel(value: String)
 
         public fun setOpenAIReasoningEffort(value: AiReasoningEffortOption)
+
+        public fun setOpenAIContextWindow(value: String)
+
+        public fun isValidOpenAIContextWindow(value: String): Boolean
 
         public fun setOpenAIExtraBody(value: String)
 
@@ -139,6 +173,11 @@ public class AiConfigPresenter : PresenterBase<AiConfigPresenter.State>() {
     @OptIn(FlowPreview::class)
     @Composable
     override fun body(): State {
+        val pluginProviders by remember {
+            pluginTranslationServiceOrNull()
+                ?.providers
+                ?: MutableStateFlow(emptyList())
+        }.collectAsState()
         val scope = rememberCoroutineScope()
         val appSettings by remember { appDataStore.appSettingsStore.data }
             .collectAsState(AppSettings(version = ""))
@@ -160,18 +199,13 @@ public class AiConfigPresenter : PresenterBase<AiConfigPresenter.State>() {
             }
         val supportedOpenAIReasoningEfforts =
             remember {
-                persistentListOf(
-                    AiReasoningEffortOption.Default,
-                    AiReasoningEffortOption.Low,
-                    AiReasoningEffortOption.Medium,
-                    AiReasoningEffortOption.High,
-                )
+                AiReasoningEffortOption.entries.toImmutableList()
             }
 
         LaunchedEffect(Unit) {
             supportedTypes =
                 buildList {
-                    if (onDeviceAI.isAvailable()) {
+                    if (!agentConfig && onDeviceAI.isAvailable()) {
                         add(AiTypeOption.OnDevice)
                     }
                     add(AiTypeOption.OpenAI)
@@ -179,7 +213,7 @@ public class AiConfigPresenter : PresenterBase<AiConfigPresenter.State>() {
         }
 
         LaunchedEffect(Unit) {
-            snapshotFlow { appSettings.aiConfig.type as? AppSettings.AiConfig.Type.OpenAI }
+            snapshotFlow { appSettings.aiConfig.editingType(agentConfig) as? AppSettings.AiConfig.Type.OpenAI }
                 .map { (it?.serverUrl ?: "") to (it?.apiKey ?: "") }
                 .distinctUntilChanged()
                 .debounce(666L)
@@ -234,21 +268,46 @@ public class AiConfigPresenter : PresenterBase<AiConfigPresenter.State>() {
             }
         }
 
+        val editingType = appSettings.aiConfig.editingType(agentConfig)
         return object : State {
+            override val isAgentConfig: Boolean = agentConfig
+            override val useSharedConfig: Boolean = appSettings.aiConfig.agentType == null
+            override val agentOpenAIApi: AgentOpenAIApi = appSettings.aiConfig.agentOpenAIApi
+            override val supportedAgentOpenAIApis: ImmutableList<AgentOpenAIApi> = AGENT_OPENAI_APIS
+
+            override fun setUseSharedConfig(value: Boolean) {
+                update { withAgentConfigInheritance(value) }
+            }
+
+            override fun setAgentOpenAIApi(value: AgentOpenAIApi) {
+                if (agentConfig) update { copy(agentOpenAIApi = value) }
+            }
+
             override val openAIModels: UiState<ImmutableList<String>> = openAIModels
             override val supportedTypes: ImmutableList<AiTypeOption> = supportedTypes
             override val supportedOpenAIReasoningEfforts: ImmutableList<AiReasoningEffortOption> =
                 supportedOpenAIReasoningEfforts
             override val supportedTranslateProviders: ImmutableList<TranslateProviderOption> =
                 supportedTranslateProviders
-            override val serverSuggestions: ImmutableList<String> = SERVER_SUGGESTIONS
+            override val serverSuggestions: ImmutableList<String> = AI_SERVER_SUGGESTIONS
             override val aiType: AiTypeOption =
-                when (appSettings.aiConfig.type) {
+                when (editingType) {
                     AppSettings.AiConfig.Type.OnDevice -> AiTypeOption.OnDevice
                     is AppSettings.AiConfig.Type.OpenAI -> AiTypeOption.OpenAI
                 }
+            override val pluginTranslateProviders = pluginProviders
+            override val selectedTranslationPluginId =
+                (appSettings.translateConfig.provider as? AppSettings.TranslateConfig.Provider.Plugin)
+                    ?.pluginId
+
+            override fun selectTranslationPlugin(pluginId: String) {
+                require(pluginProviders.any { it.pluginId == pluginId }) { "Translation plugin is unavailable" }
+                updateTranslateConfig { copy(provider = AppSettings.TranslateConfig.Provider.Plugin(pluginId)) }
+            }
+
             override val translateProvider: TranslateProviderOption =
                 when (appSettings.translateConfig.provider) {
+                    is AppSettings.TranslateConfig.Provider.Plugin -> TranslateProviderOption.Plugin
                     AppSettings.TranslateConfig.Provider.AI -> TranslateProviderOption.AI
                     AppSettings.TranslateConfig.Provider.GoogleWeb -> TranslateProviderOption.GoogleWeb
                     is AppSettings.TranslateConfig.Provider.DeepL -> TranslateProviderOption.DeepL
@@ -267,21 +326,24 @@ public class AiConfigPresenter : PresenterBase<AiConfigPresenter.State>() {
                 (appSettings.translateConfig.provider as? AppSettings.TranslateConfig.Provider.LibreTranslate)?.apiKey ?: ""
 
             override val openAIServerUrl: String =
-                (appSettings.aiConfig.type as? AppSettings.AiConfig.Type.OpenAI)?.serverUrl ?: ""
+                (editingType as? AppSettings.AiConfig.Type.OpenAI)?.serverUrl ?: ""
 
             override val openAIApiKey: String =
-                (appSettings.aiConfig.type as? AppSettings.AiConfig.Type.OpenAI)?.apiKey ?: ""
+                (editingType as? AppSettings.AiConfig.Type.OpenAI)?.apiKey ?: ""
 
             override val openAIModel: String =
-                (appSettings.aiConfig.type as? AppSettings.AiConfig.Type.OpenAI)?.model ?: ""
+                (editingType as? AppSettings.AiConfig.Type.OpenAI)?.model ?: ""
 
             override val openAIReasoningEffort: AiReasoningEffortOption =
                 AiReasoningEffortOption.entries.firstOrNull {
-                    it.value == (appSettings.aiConfig.type as? AppSettings.AiConfig.Type.OpenAI)?.reasoningEffort.orEmpty()
+                    it.value == (editingType as? AppSettings.AiConfig.Type.OpenAI)?.reasoningEffort.orEmpty()
                 } ?: AiReasoningEffortOption.Default
 
+            override val openAIContextWindow: String =
+                (editingType as? AppSettings.AiConfig.Type.OpenAI)?.contextWindow?.toString().orEmpty()
+
             override val openAIExtraBody: String =
-                (appSettings.aiConfig.type as? AppSettings.AiConfig.Type.OpenAI)?.extraBody ?: ""
+                (editingType as? AppSettings.AiConfig.Type.OpenAI)?.extraBody ?: ""
 
             override val aiTldr: Boolean = appSettings.aiConfig.tldr
             override val aiAgent: Boolean = appSettings.aiConfig.agent
@@ -366,101 +428,35 @@ public class AiConfigPresenter : PresenterBase<AiConfigPresenter.State>() {
             }
 
             override fun setAIType(value: AiTypeOption) {
-                update {
-                    copy(
-                        type =
-                            when (value) {
-                                AiTypeOption.OnDevice -> {
-                                    AppSettings.AiConfig.Type.OnDevice
-                                }
-
-                                AiTypeOption.OpenAI -> {
-                                    AppSettings.AiConfig.Type.OpenAI(
-                                        serverUrl = "",
-                                        apiKey = "",
-                                        model = "",
-                                        reasoningEffort = "",
-                                        extraBody = "",
-                                    )
-                                }
-                            },
-                    )
-                }
+                selectType(value)
             }
 
             override fun setOpenAIServerUrl(value: String) {
-                update {
-                    copy(
-                        type =
-                            AppSettings.AiConfig.Type.OpenAI(
-                                serverUrl = value,
-                                apiKey = openAIApiKey,
-                                model = openAIModel,
-                                reasoningEffort = openAIReasoningEffort.value,
-                                extraBody = openAIExtraBody,
-                            ),
-                    )
-                }
+                update { updateOpenAIConfig(agentConfig) { copy(serverUrl = value) } }
             }
 
             override fun setOpenAIApiKey(value: String) {
-                update {
-                    copy(
-                        type =
-                            AppSettings.AiConfig.Type.OpenAI(
-                                serverUrl = openAIServerUrl,
-                                apiKey = value,
-                                model = openAIModel,
-                                reasoningEffort = openAIReasoningEffort.value,
-                                extraBody = openAIExtraBody,
-                            ),
-                    )
-                }
+                update { updateOpenAIConfig(agentConfig) { copy(apiKey = value) } }
             }
 
             override fun setOpenAIModel(value: String) {
-                update {
-                    copy(
-                        type =
-                            AppSettings.AiConfig.Type.OpenAI(
-                                serverUrl = openAIServerUrl,
-                                apiKey = openAIApiKey,
-                                model = value,
-                                reasoningEffort = openAIReasoningEffort.value,
-                                extraBody = openAIExtraBody,
-                            ),
-                    )
-                }
+                update { updateOpenAIConfig(agentConfig) { copy(model = value) } }
             }
 
             override fun setOpenAIReasoningEffort(value: AiReasoningEffortOption) {
-                update {
-                    copy(
-                        type =
-                            AppSettings.AiConfig.Type.OpenAI(
-                                serverUrl = openAIServerUrl,
-                                apiKey = openAIApiKey,
-                                model = openAIModel,
-                                reasoningEffort = value.value,
-                                extraBody = openAIExtraBody,
-                            ),
-                    )
-                }
+                update { updateOpenAIConfig(agentConfig) { copy(reasoningEffort = value.value) } }
+            }
+
+            override fun isValidOpenAIContextWindow(value: String): Boolean =
+                value.isBlank() || (value.trim().toIntOrNull()?.let { it >= 1024 } == true)
+
+            override fun setOpenAIContextWindow(value: String) {
+                require(isValidOpenAIContextWindow(value))
+                update { updateOpenAIConfig(agentConfig) { copy(contextWindow = value.trim().toIntOrNull()) } }
             }
 
             override fun setOpenAIExtraBody(value: String) {
-                update {
-                    copy(
-                        type =
-                            AppSettings.AiConfig.Type.OpenAI(
-                                serverUrl = openAIServerUrl,
-                                apiKey = openAIApiKey,
-                                model = openAIModel,
-                                reasoningEffort = openAIReasoningEffort.value,
-                                extraBody = value,
-                            ),
-                    )
-                }
+                update { updateOpenAIConfig(agentConfig) { copy(extraBody = value) } }
             }
 
             override fun setDeepLApiKey(value: String) {
@@ -518,6 +514,11 @@ public class AiConfigPresenter : PresenterBase<AiConfigPresenter.State>() {
                     copy(
                         provider =
                             when (value) {
+                                TranslateProviderOption.Plugin -> {
+                                    provider as? AppSettings.TranslateConfig.Provider.Plugin
+                                        ?: error("Choose a translation plugin")
+                                }
+
                                 TranslateProviderOption.AI -> {
                                     AppSettings.TranslateConfig.Provider.AI
                                 }
@@ -549,22 +550,11 @@ public class AiConfigPresenter : PresenterBase<AiConfigPresenter.State>() {
                 update {
                     when (type) {
                         AiTypeOption.OnDevice -> {
-                            copy(type = AppSettings.AiConfig.Type.OnDevice)
+                            if (agentConfig) this else copy(type = AppSettings.AiConfig.Type.OnDevice)
                         }
 
                         AiTypeOption.OpenAI -> {
-                            val currentType = this.type as? AppSettings.AiConfig.Type.OpenAI
-                            copy(
-                                type =
-                                    currentType
-                                        ?: AppSettings.AiConfig.Type.OpenAI(
-                                            serverUrl = "",
-                                            apiKey = "",
-                                            model = "",
-                                            reasoningEffort = "",
-                                            extraBody = "",
-                                        ),
-                            )
+                            updateOpenAIConfig(agentConfig) { this }
                         }
                     }
                 }
@@ -575,6 +565,11 @@ public class AiConfigPresenter : PresenterBase<AiConfigPresenter.State>() {
                     copy(
                         provider =
                             when (type) {
+                                TranslateProviderOption.Plugin -> {
+                                    provider as? AppSettings.TranslateConfig.Provider.Plugin
+                                        ?: error("Choose a translation plugin")
+                                }
+
                                 TranslateProviderOption.AI -> {
                                     AppSettings.TranslateConfig.Provider.AI
                                 }
@@ -603,6 +598,30 @@ public class AiConfigPresenter : PresenterBase<AiConfigPresenter.State>() {
             }
         }
     }
+}
+
+private val AGENT_OPENAI_APIS = AgentOpenAIApi.entries.toImmutableList()
+
+private fun AppSettings.AiConfig.editingType(agentConfig: Boolean): AppSettings.AiConfig.Type =
+    if (agentConfig) effectiveAgentType else type
+
+internal fun AppSettings.AiConfig.withAgentConfigInheritance(value: Boolean): AppSettings.AiConfig =
+    copy(
+        agentType =
+            if (value) {
+                null
+            } else {
+                agentType ?: (type as? AppSettings.AiConfig.Type.OpenAI) ?: AppSettings.AiConfig.Type.OpenAI("", "", "")
+            },
+    )
+
+internal fun AppSettings.AiConfig.updateOpenAIConfig(
+    agentConfig: Boolean,
+    update: AppSettings.AiConfig.Type.OpenAI.() -> AppSettings.AiConfig.Type.OpenAI,
+): AppSettings.AiConfig {
+    val current = editingType(agentConfig) as? AppSettings.AiConfig.Type.OpenAI ?: AppSettings.AiConfig.Type.OpenAI("", "", "")
+    val updated = current.update()
+    return if (agentConfig) copy(agentType = updated) else copy(type = updated)
 }
 
 private fun AppSettings.AiConfig.normalized(): AppSettings.AiConfig = this
@@ -636,7 +655,7 @@ internal fun normalizeExcludedLanguages(languages: List<String>): List<String> =
         .distinctBy { canonicalTranslationLanguage(it) ?: it.lowercase() }
         .toList()
 
-private val SERVER_SUGGESTIONS =
+internal val AI_SERVER_SUGGESTIONS =
     persistentListOf(
         "https://api.openai.com/v1/",
         "https://generativelanguage.googleapis.com/v1beta/openai/",

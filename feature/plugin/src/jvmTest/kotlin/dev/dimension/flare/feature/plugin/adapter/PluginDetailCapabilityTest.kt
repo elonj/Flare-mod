@@ -1,0 +1,1629 @@
+package dev.dimension.flare.feature.plugin.adapter
+
+import androidx.paging.LoadState
+import dev.dimension.flare.common.CacheState
+import dev.dimension.flare.data.datasource.microblog.ActionMenu
+import dev.dimension.flare.data.datasource.microblog.ComposeData
+import dev.dimension.flare.data.datasource.microblog.ComposeType
+import dev.dimension.flare.data.datasource.microblog.DatabaseUpdater
+import dev.dimension.flare.data.datasource.microblog.NotificationFilter
+import dev.dimension.flare.data.datasource.microblog.PostActionFamily
+import dev.dimension.flare.data.datasource.microblog.PostEvent
+import dev.dimension.flare.data.datasource.microblog.SearchOperation
+import dev.dimension.flare.data.datasource.microblog.datasource.GalleryDetail
+import dev.dimension.flare.data.datasource.microblog.list.ListMetaData
+import dev.dimension.flare.data.datasource.microblog.loader.RelationActionType
+import dev.dimension.flare.data.datasource.microblog.paging.CacheableRemoteLoader
+import dev.dimension.flare.data.datasource.microblog.paging.PagingRequest
+import dev.dimension.flare.feature.plugin.abi.PluginAbiV1
+import dev.dimension.flare.feature.plugin.host.PluginHttpTransport
+import dev.dimension.flare.feature.plugin.host.PluginTransportBodyV1
+import dev.dimension.flare.feature.plugin.host.PluginTransportRequestV1
+import dev.dimension.flare.feature.plugin.host.PluginTransportResponseV1
+import dev.dimension.flare.feature.plugin.installer.PluginInstaller
+import dev.dimension.flare.feature.plugin.installer.TestFppFactory
+import dev.dimension.flare.feature.plugin.lifecycle.PluginStateStore
+import dev.dimension.flare.feature.plugin.lifecycle.RunningPluginV1
+import dev.dimension.flare.feature.plugin.manifest.socialPlatform
+import dev.dimension.flare.feature.plugin.runtime.PluginCallException
+import dev.dimension.flare.feature.plugin.runtime.PluginRuntimePool
+import dev.dimension.flare.feature.plugin.runtime.PluginRuntimeUnavailableException
+import dev.dimension.flare.feature.plugin.wire.EntityKeyV1
+import dev.dimension.flare.feature.plugin.wire.LoginSuccessV1
+import dev.dimension.flare.feature.plugin.wire.PluginAccountCredentialV1
+import dev.dimension.flare.feature.plugin.wire.ProfileV1
+import dev.dimension.flare.model.AccountType
+import dev.dimension.flare.model.MicroBlogKey
+import dev.dimension.flare.model.PlatformDataSourceContext
+import dev.dimension.flare.model.ReferenceType
+import dev.dimension.flare.ui.model.ClickContext
+import dev.dimension.flare.ui.model.ClickEvent
+import dev.dimension.flare.ui.model.UiDMItem
+import dev.dimension.flare.ui.model.UiTimelineV2
+import dev.dimension.flare.ui.model.UriLauncher
+import dev.dimension.flare.ui.model.postEventOrNull
+import dev.dimension.flare.ui.presenter.compose.ComposeStatus
+import dev.dimension.flare.ui.route.DeeplinkRoute
+import kotlinx.collections.immutable.persistentListOf
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.job
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeout
+import kotlinx.serialization.KSerializer
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import okio.FileSystem
+import okio.Path
+import okio.Path.Companion.toOkioPath
+import okio.SYSTEM
+import java.nio.file.Files
+import java.nio.file.Paths
+import kotlin.test.AfterTest
+import kotlin.test.BeforeTest
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
+import kotlin.test.assertIs
+import kotlin.test.assertNotEquals
+import kotlin.test.assertNull
+import kotlin.test.assertTrue
+
+class PluginDetailCapabilityTest {
+    private val fileSystem = FileSystem.SYSTEM
+    private lateinit var root: Path
+    private lateinit var runtimePool: PluginRuntimePool
+    private lateinit var scope: CoroutineScope
+    private lateinit var transport: NoopTransport
+
+    @BeforeTest
+    fun setUp() {
+        root = Files.createTempDirectory("plugin-detail-capability-test").toOkioPath()
+        transport = NoopTransport()
+        runtimePool = PluginRuntimePool(fileSystem, transport)
+        scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    }
+
+    @AfterTest
+    fun tearDown() =
+        runBlocking {
+            scope.cancel()
+            runtimePool.close()
+            fileSystem.deleteRecursively(root, mustExist = false)
+        }
+
+    @Test
+    fun temporaryPagesKeepAccountBoundTargetsAndAdvanceAcrossEmptyPages() =
+        runBlocking {
+            val running = installShowcase()
+            val source = authenticated(running)
+            val pages = source.capabilitySet.timelinePage!!
+            val original =
+                assertIs<UiTimelineV2.TimelinePostItem>(
+                    source
+                        .timeline("home")
+                        .load(20, PagingRequest.Refresh)
+                        .data
+                        .first(),
+                )
+            val route =
+                assertIs<DeeplinkRoute.Timeline.Page>(
+                    DeeplinkRoute.parse(
+                        assertIs<ClickEvent.Deeplink>(
+                            original.presentation.quotes
+                                .single()
+                                .clickEvent,
+                        ).url,
+                    ),
+                )
+            assertEquals(pages.pluginId, route.pluginId)
+            assertEquals(pages.packageHash, route.packageHash)
+            val loader = assertIs<CacheableRemoteLoader<UiTimelineV2>>(pages.timelinePage(route.pageId, route.parameters))
+            assertFalse(loader.collapseReplyChains)
+            val first = loader.load(1, PagingRequest.Refresh)
+            assertEquals("empty", first.nextKey)
+            val child = assertIs<UiTimelineV2.TimelinePostItem>(first.data.single()).post
+            val childRoute = assertIs<DeeplinkRoute.Timeline.Page>(DeeplinkRoute.parse(assertIs<ClickEvent.Deeplink>(child.clickEvent).url))
+            assertEquals(child.statusKey.id, childRoute.parameters["parentId"])
+            val empty = loader.load(1, PagingRequest.Append(first.nextKey!!))
+            assertTrue(empty.data.isEmpty())
+            assertEquals("next", empty.nextKey)
+            val last = loader.load(1, PagingRequest.Append(empty.nextKey!!))
+            assertEquals(1, last.data.size)
+            assertNull(last.nextKey)
+            assertFailsWith<PluginCallException> { pages.timelinePage("missing", route.parameters).load(1, PagingRequest.Refresh) }
+            val ordered = mapOf("sort" to "oldest", "parentId" to "quote")
+            val reversed = mapOf("parentId" to "quote", "sort" to "oldest")
+
+            fun key(parameters: Map<String, String>) =
+                assertIs<CacheableRemoteLoader<UiTimelineV2>>(pages.timelinePage("replies", parameters)).pagingKey
+            assertEquals(key(ordered), key(reversed))
+            assertNotEquals(key(ordered), key(ordered + ("parentId" to "different")))
+            val otherAccount = authenticated(running, accountKey = MicroBlogKey("account-2", "plugin.example"))
+            assertNotEquals(
+                loader.pagingKey,
+                assertIs<CacheableRemoteLoader<UiTimelineV2>>(
+                    otherAccount.capabilitySet.timelinePage!!.timelinePage(route.pageId, route.parameters),
+                ).pagingKey,
+            )
+            assertNull(
+                authenticated(running, unavailableCapabilities = setOf(PluginAbiV1.Capabilities.TIMELINE_PAGE)).capabilitySet.timelinePage,
+            )
+        }
+
+    @Test
+    fun fullMutationResultsKeepTargetsAndDeletionInvalidatesTemporaryLists() =
+        runBlocking {
+            for (deleted in listOf(false, true)) {
+                val source =
+                    authenticated(
+                        installShowcase { script ->
+                            val targeted =
+                                script.replace(
+                                    "id === \"quote\" || id.startsWith(\"reply-\")",
+                                    "id === \"poll\" || id === \"quote\" || id.startsWith(\"reply-\")",
+                                )
+                            if (deleted) {
+                                targeted.replace(
+                                    "return { type: \"updatedPost\", post: post(\"poll\", context) };",
+                                    "return { type: \"deleted\" };",
+                                )
+                            } else {
+                                targeted
+                            }
+                        },
+                    )
+                val original =
+                    assertIs<UiTimelineV2.TimelinePostItem>(
+                        source
+                            .timeline("home")
+                            .load(20, PagingRequest.Refresh)
+                            .data
+                            .first(),
+                    ).post
+                val pages = source.capabilitySet.timelinePage!!
+                val updater = RecordingDatabaseUpdater(original)
+                var event: PostEvent? = null
+                original.poll!!.onVote.invoke(
+                    ClickContext(UriLauncher { event = ClickEvent.Deeplink(it).postEventOrNull()!!.postEvent }),
+                    persistentListOf(0),
+                )
+                source.postMutationHandler.handle(event!!, updater)
+                assertEquals(if (deleted) 1L else 0L, pages.revision.value)
+                if (deleted) {
+                    assertNull(updater.current)
+                } else {
+                    assertEquals(original.clickEvent, assertIs<UiTimelineV2.Post>(updater.current).clickEvent)
+                }
+            }
+        }
+
+    @Test
+    fun pageOnlyLoadingNeedsNoHomeOrCatalogAndTracksPublishAndDelete() =
+        runBlocking {
+            val manifest =
+                """
+                { "schemaVersion": 1, "apiVersion": 2, "id": "dev.example.pages", "version": "1.0.0", "name": "Pages",
+                  "platform": { "id": "Pages", "name": "Pages",
+                    "composeDefaults": { "supportedTypes": ["new", "reply"] },
+                    "capabilities": {
+                      "flare.datasource.timeline-page/v1": { "operations": { "load": {} } },
+                      "flare.datasource.post/v1": { "operations": { "detail": {}, "delete": {} } },
+                      "flare.datasource.compose/v2": { "operations": { "publish": {} } }
+                    }
+                  }
+                }
+                """.trimIndent()
+            val script =
+                """
+                function post(context) { return { key: { id: "published", host: context.origin.slice(8) },
+                  createdAt: "2026-11-09T00:00:00Z", content: { value: "A reply" },
+                  target: { type: "timelinePage", pageId: "replies", title: { value: "Replies" } } }; }
+                defineFlareSocialPlugin({ capabilities: {
+                  timelinePage: { load() { return { items: [], endReached: true }; } },
+                  post: { detail(request, context) { return { post: post(context) }; },
+                    delete(request) { return { type: request.key.id === "noop" ? "noChange" : "deleted" }; } },
+                  compose: { publish(request, context) { return { post: post(context) }; } }
+                } });
+                """.trimIndent()
+            val source = authenticated(install(manifest, script))
+            assertNull(source.capabilitySet.timeline)
+            assertNull(source.capabilitySet.tabCatalog)
+            val pages = source.capabilitySet.timelinePage!!
+            assertTrue(
+                pages
+                    .timelinePage("replies", emptyMap())
+                    .load(20, PagingRequest.Refresh)
+                    .data
+                    .isEmpty(),
+            )
+            source.capabilitySet.compose!!.compose(ComposeData("A reply")) {}
+            assertEquals(1L, pages.revision.value)
+            val posts =
+                source.capabilitySet.post!!
+                    .postHandler.loader
+            posts.deleteStatus(MicroBlogKey("noop", "plugin.example"))
+            assertEquals(1L, pages.revision.value)
+            posts.deleteStatus(MicroBlogKey("published", "plugin.example"))
+            assertEquals(2L, pages.revision.value)
+        }
+
+    @Test
+    fun zhihuStyleCommentContextSurvivesNavigationRuntimeEvictionAndReply() = runBlocking { forumCommentScenario("zhihu") }
+
+    @Test
+    fun tiebaStyleFloorAndSubreplyIdsSurviveNavigationRuntimeEvictionAndReply() = runBlocking { forumCommentScenario("tieba") }
+
+    private suspend fun forumCommentScenario(kind: String) {
+        val rootId = "2050290260991534603"
+        val floorId = "2050290260991534604"
+        val firstId = "2050290260991534605"
+        val secondId = "2050290260991534606"
+        val manifest =
+            """
+            { "apiVersion": 2, "id": "dev.example.$kind", "version": "1.0.0", "name": "Forum fixture",
+              "platform": { "id": "ForumFixture", "name": "Forum fixture",
+                "composeDefaults": { "supportedTypes": ["reply"] },
+                "capabilities": {
+                  "flare.datasource.timeline-page/v1": { "operations": { "load": { "directions": ["refresh", "older"] } } },
+                  "flare.datasource.post/v1": { "operations": { "detail": {}, "mutate": {} } },
+                  "flare.datasource.compose/v2": { "operations": { "publish": {} } }
+                }
+              }
+            }
+            """.trimIndent()
+        val script = requireNotNull(javaClass.getResource("/forum-replies-v2.js")).readText().replace("__PLATFORM__", kind)
+        val running = install(manifest, script)
+        val source = authenticated(running)
+        assertNull(source.capabilitySet.timeline)
+        assertNull(source.capabilitySet.tabCatalog)
+        val owner = MicroBlogKey(if (kind == "zhihu") "pin:$rootId" else "t$rootId", "plugin.example")
+        val posts =
+            source.capabilitySet.post!!
+                .postHandler.loader
+        val parent = assertIs<UiTimelineV2.TimelinePostItem>(posts.status(owner))
+        val entry =
+            assertIs<DeeplinkRoute.Timeline.Page>(
+                DeeplinkRoute.parse(
+                    assertIs<ClickEvent.Deeplink>(
+                        parent.presentation.quotes
+                            .single()
+                            .clickEvent,
+                    ).url,
+                ),
+            )
+        assertEquals(rootId, entry.parameters["rootId"])
+        assertEquals(floorId, entry.parameters["floorPid"])
+        val pages = source.capabilitySet.timelinePage!!
+        val hot = assertIs<CacheableRemoteLoader<UiTimelineV2>>(pages.timelinePage(entry.pageId, entry.parameters))
+        assertFalse(hot.collapseReplyChains)
+        val initial = hot.load(20, PagingRequest.Refresh)
+        assertEquals(3, initial.data.size)
+        val comments = initial.data.map { assertIs<UiTimelineV2.TimelinePostItem>(it).post }
+        val first = comments[1]
+        val second = comments[2]
+        assertTrue(first.statusKey.id.endsWith(firstId))
+        assertTrue(second.statusKey.id.endsWith(secondId))
+        assertEquals(first.statusKey, second.references.single { it.type == ReferenceType.Reply }.statusKey)
+        assertEquals(UiTimelineV2.Post.MediaClickPolicy.OpenPostClickEvent, second.mediaClickPolicy)
+        val nested = assertIs<DeeplinkRoute.Timeline.Page>(DeeplinkRoute.parse(assertIs<ClickEvent.Deeplink>(second.clickEvent).url))
+        assertEquals(secondId, nested.parameters["parentId"])
+        assertEquals(rootId, nested.parameters["rootId"])
+        val nextLevel = pages.timelinePage(nested.pageId, nested.parameters).load(20, PagingRequest.Refresh)
+        assertEquals(second.statusKey, nextLevel.data.first().statusKey)
+        val descendant = assertIs<UiTimelineV2.TimelinePostItem>(nextLevel.data[1]).post
+        assertTrue(descendant.statusKey.id.endsWith("2050290260991534607"))
+        assertEquals(second.statusKey, descendant.references.single { it.type == ReferenceType.Reply }.statusKey)
+        val limited = pages.timelinePage(entry.pageId, entry.parameters + ("mode" to "remote-offset"))
+        val limitedIds = mutableListOf<MicroBlogKey>()
+        var limitedPage = limited.load(1, PagingRequest.Refresh)
+        repeat(comments.size) { index ->
+            limitedIds += limitedPage.data.map { it.statusKey }
+            if (index < comments.lastIndex) {
+                val cursor = requireNotNull(limitedPage.nextKey)
+                assertTrue(cursor.startsWith("{"), "The plugin keeps the within-page offset in an opaque JSON cursor")
+                limitedPage = limited.load(1, PagingRequest.Append(cursor))
+            } else {
+                assertNull(limitedPage.nextKey)
+            }
+        }
+        assertEquals(comments.map { it.statusKey }, limitedIds)
+        val latest =
+            assertIs<CacheableRemoteLoader<UiTimelineV2>>(pages.timelinePage(entry.pageId, entry.parameters + ("sort" to "latest")))
+        assertNotEquals(hot.pagingKey, latest.pagingKey)
+        assertEquals(
+            listOf(second.statusKey, first.statusKey),
+            latest
+                .load(20, PagingRequest.Refresh)
+                .data
+                .drop(1)
+                .map { it.statusKey },
+        )
+        val empty = hot.load(20, PagingRequest.Append(initial.nextKey!!))
+        assertTrue(empty.data.isEmpty())
+        assertEquals("21", empty.nextKey)
+        val tail = hot.load(20, PagingRequest.Append(empty.nextKey!!))
+        assertEquals(1, tail.data.size)
+        assertNull(tail.nextKey)
+        // Fresh runtimes must recover all write context from the stable key, not a previously opened list.
+        runtimePool.closeIdle()
+        val detail = assertIs<UiTimelineV2.TimelinePostItem>(posts.status(second.statusKey)).post
+        assertEquals(second.statusKey, detail.statusKey)
+        assertEquals(second.clickEvent, detail.clickEvent)
+        val updater = RecordingDatabaseUpdater(detail)
+        val like = detail.actions.filterIsInstance<ActionMenu.Item>().single { it.actionFamily == PostActionFamily.Like }
+        source.postMutationHandler.handle(requireNotNull(like.clickEvent.postEventOrNull()).postEvent, updater)
+        val updatedLike =
+            assertIs<UiTimelineV2.Post>(updater.current).actions.filterIsInstance<ActionMenu.Item>().single {
+                it.actionFamily ==
+                    PostActionFamily.Like
+            }
+        assertEquals(1L, updatedLike.count?.value)
+        assertEquals(second.clickEvent, assertIs<UiTimelineV2.Post>(updater.current).clickEvent)
+        runtimePool.closeIdle()
+        source.capabilitySet.compose!!.compose(
+            ComposeData("回复这条评论", referenceStatus = ComposeData.ReferenceStatus(ComposeStatus.Reply(second.statusKey))),
+        ) {}
+        val published = Json.parseToJsonElement(assertIs<PluginTransportBodyV1.Text>(transport.requests.last().body).value).jsonObject
+        assertEquals("publish", published.getValue("operation").jsonPrimitive.content)
+        val context = published.getValue("context").jsonObject
+        assertEquals(rootId, context.getValue("rootId").jsonPrimitive.content)
+        assertEquals(floorId, context.getValue("floorPid").jsonPrimitive.content)
+        assertEquals(secondId, context.getValue("replyToId").jsonPrimitive.content)
+        assertEquals(
+            second.statusKey.id,
+            published
+                .getValue("reference")
+                .jsonObject
+                .getValue("key")
+                .jsonObject
+                .getValue("id")
+                .jsonPrimitive.content,
+        )
+        assertEquals(1L, pages.revision.value)
+    }
+
+    @Test
+    fun notificationLoaderPreservesIndependentRows() =
+        runBlocking {
+            val source = authenticated(installShowcase())
+            val loader =
+                assertIs<CacheableRemoteLoader<UiTimelineV2>>(
+                    source.capabilitySet.notification!!
+                        .timeline!!
+                        .notification(),
+                )
+            assertFalse(loader.collapseReplyChains)
+            val notifications = loader.load(20, PagingRequest.Refresh).data
+            assertEquals(1, notifications.map { it.statusKey }.distinct().size)
+            assertEquals(2, notifications.map { it.stableItemKey }.distinct().size)
+            assertTrue(assertIs<CacheableRemoteLoader<UiTimelineV2>>(source.timeline("home")).collapseReplyChains)
+        }
+
+    @Test
+    fun showcaseRoundTripsMixedItemsAndRoutesPollAndReactionClicksThroughTheRuntime() =
+        runBlocking {
+            val source = authenticated(installShowcase())
+            val items = source.timeline("home").load(20, PagingRequest.Refresh).data
+            assertEquals(6, items.size)
+            assertIs<UiTimelineV2.Feed>(items[1])
+            assertIs<UiTimelineV2.User>(items[2])
+            assertIs<UiTimelineV2.UserList>(items[3])
+            assertIs<UiTimelineV2.Message>(items[4])
+            val original = assertIs<UiTimelineV2.TimelinePostItem>(items.first())
+            assertEquals(1, original.presentation.inlineParents.size)
+            val notifications =
+                source.capabilitySet.notification!!
+                    .timeline!!
+                    .notification()
+                    .load(20, PagingRequest.Refresh)
+                    .data
+            assertEquals(1, notifications.map { it.statusKey }.distinct().size)
+            assertEquals(2, notifications.map { assertIs<UiTimelineV2.TimelinePostItem>(it).presentation.notificationKey }.distinct().size)
+
+            var click: PostEvent? = null
+            original.post.poll!!.onVote.invoke(
+                ClickContext(
+                    UriLauncher {
+                        click = ClickEvent.Deeplink(it).postEventOrNull()!!.postEvent
+                    },
+                ),
+                persistentListOf(1),
+            )
+            val vote = assertIs<PostEvent.PluginVote>(click)
+            assertEquals("Vote:0", vote.actionToken)
+            val updater = RecordingDatabaseUpdater(original.post)
+            source.postMutationHandler.handle(vote, updater)
+            val voted = assertIs<UiTimelineV2.Post>(updater.current)
+            assertEquals(listOf(1), voted.poll!!.ownVotes)
+            assertEquals(4, voted.poll!!.options[1].votesCount)
+            assertFalse(voted.poll!!.canVote)
+            assertFailsWith<PluginCallException> { source.postMutationHandler.handle(vote, updater) }
+            assertEquals(voted, updater.current)
+            assertEquals(1, updater.updates)
+
+            val react =
+                assertIs<PostEvent.PluginAction>(
+                    voted.emojiReactions
+                        .single()
+                        .clickEvent
+                        .postEventOrNull()!!
+                        .postEvent,
+                )
+            assertEquals("React:1", react.actionToken)
+            source.postMutationHandler.handle(react, updater)
+            val reacted = assertIs<UiTimelineV2.Post>(updater.current)
+            assertTrue(reacted.emojiReactions.single().me)
+            assertNotEquals(voted.renderHash, reacted.renderHash)
+            val unreact =
+                assertIs<PostEvent.PluginAction>(
+                    reacted.emojiReactions
+                        .single()
+                        .clickEvent
+                        .postEventOrNull()!!
+                        .postEvent,
+                )
+            assertEquals("Unreact:2", unreact.actionToken)
+            source.postMutationHandler.handle(unreact, updater)
+            assertFalse(assertIs<UiTimelineV2.Post>(updater.current).emojiReactions.single().me)
+        }
+
+    @Test
+    fun followRequestActionsUseProfileKeysAndRemoveOnlyTheirOwnRowsWithoutPostCapability() =
+        runBlocking {
+            val source = authenticated(installShowcase(), unavailableCapabilities = setOf(PluginAbiV1.Capabilities.POST))
+            assertTrue(source.capabilitySet.post != null)
+            val items = source.timeline("home").load(20, PagingRequest.Refresh).data
+            assertEquals(ClickEvent.Noop, assertIs<UiTimelineV2.TimelinePostItem>(items.first()).post.clickEvent)
+            val row = assertIs<UiTimelineV2.User>(items.last())
+            val accept =
+                assertIs<PostEvent.PluginAction>(
+                    row.button
+                        .first()
+                        .clickEvent
+                        .postEventOrNull()!!
+                        .postEvent,
+                )
+            assertEquals("alice", accept.entityKey.id)
+            assertNotEquals(accept.postKey, accept.entityKey)
+            val updater = RecordingDatabaseUpdater(row)
+            source.postMutationHandler.handle(accept, updater)
+            assertNull(updater.current)
+            assertEquals(listOf(row.statusKey), updater.deleted)
+            assertEquals(
+                5,
+                source
+                    .timeline("home")
+                    .load(20, PagingRequest.Refresh)
+                    .data.size,
+            )
+        }
+
+    @Test
+    fun profileActionsRejectMismatchedResultsBeforeUpdatingTheCache() =
+        runBlocking {
+            val source =
+                authenticated(
+                    installShowcase {
+                        it.replace(
+                            "return { type: \"deleted\" };",
+                            "return { type: \"updatedProfile\", profile: profile(\"unrelated\", context) };",
+                        )
+                    },
+                )
+            val row =
+                assertIs<UiTimelineV2.User>(
+                    source
+                        .timeline("home")
+                        .load(20, PagingRequest.Refresh)
+                        .data
+                        .last(),
+                )
+            val updater = RecordingDatabaseUpdater(row)
+            val action =
+                row.button
+                    .first()
+                    .clickEvent
+                    .postEventOrNull()!!
+                    .postEvent
+            assertFailsWith<PluginRuntimeUnavailableException> { source.postMutationHandler.handle(action, updater) }
+            assertEquals(0, updater.updates)
+            assertEquals(row, updater.current)
+        }
+
+    @Test
+    fun optionalUgoiraMetadataUsesTheGalleryCapabilityAndValidatesFramesAndMediaPermission() =
+        runBlocking<Unit> {
+            val manifest =
+                MANIFEST.replace(
+                    "\"recommendations\": { \"directions\": [\"refresh\"] }",
+                    "\"recommendations\": { \"directions\": [\"refresh\"] }, \"ugoiraMetadata\": {}",
+                )
+            val script =
+                SCRIPT.replace(
+                    "gallery: {",
+                    "gallery: { ugoiraMetadata() { return { zipUrl: 'https://plugin.example/frames.zip', frames: [{ file: '0.jpg', delayMillis: 100 }] }; },",
+                )
+            val key = MicroBlogKey("animation", "plugin.example")
+            val gallery = authenticated(install(manifest, script)).capabilitySet.gallery!!
+            assertEquals(
+                "0.jpg",
+                gallery
+                    .ugoiraMetadata(key)
+                    .frames
+                    .single()
+                    .file,
+            )
+            val invalid = authenticated(install(manifest, script.replace("0.jpg", "../0.jpg"))).capabilitySet.gallery!!
+            assertFailsWith<PluginRuntimeUnavailableException> { invalid.ugoiraMetadata(key) }
+            val denied =
+                authenticated(
+                    install(manifest.replace("\"mediaNetwork\": true", "\"mediaNetwork\": false"), script),
+                ).capabilitySet.gallery!!
+            assertFailsWith<IllegalArgumentException> { denied.ugoiraMetadata(key) }
+        }
+
+    private suspend fun installShowcase(transform: (String) -> String = { it }): RunningPluginV1 {
+        val sample =
+            sequenceOf(
+                Paths.get("sdk/skill/flare-plugin/examples/timeline-showcase"),
+                Paths.get("feature/plugin/sdk/skill/flare-plugin/examples/timeline-showcase"),
+            ).first { Files.exists(it.resolve("manifest.json")) }
+        return install(Files.readString(sample.resolve("manifest.json")), transform(Files.readString(sample.resolve("plugin.js"))))
+    }
+
+    @Test
+    fun partialSearchDispatchesOnlyNegotiatedOperationsAndKeepsProfileLookupOptional() =
+        runBlocking {
+            val manifest =
+                MANIFEST.replace(
+                    "\"capabilities\": {",
+                    """
+                    "capabilities": {
+                      "flare.datasource.search/v1": { "operations": { "profiles": {}, "discoverHashtags": {} } },
+                    """.trimIndent(),
+                )
+            val script =
+                SCRIPT.replace(
+                    "capabilities: {",
+                    """
+                    capabilities: {
+                      search: {
+                        profiles(request) {
+                          return { items: [{ key: { id: "alice", host: "plugin.example" }, handle: request.query, displayName: "Alice" }] };
+                        },
+                        discoverHashtags() { return { items: [{ name: "#trend" }] }; }
+                      },
+                    """.trimIndent(),
+                )
+            val plugin = install(manifest, script)
+            val search = PluginAbiV1.Capabilities.SEARCH
+            val profilesOnly = authenticated(plugin, unavailableOperations = mapOf(search to setOf("discoverHashtags")))
+            val profiles = requireNotNull(profilesOnly.capabilitySet.search)
+            assertTrue(profiles.supports(SearchOperation.Profiles))
+            assertFalse(profiles.supports(SearchOperation.DiscoverHashtags))
+            val result =
+                profiles
+                    .searchUser("alice")
+                    .load(20, PagingRequest.Refresh)
+                    .data
+                    .single()
+            assertEquals("alice", result.handle.raw)
+            assertEquals(ClickEvent.Noop, result.clickEvent)
+            assertTrue(
+                profiles
+                    .searchStatus("alice")
+                    .load(20, PagingRequest.Refresh)
+                    .data
+                    .isEmpty(),
+            )
+            assertTrue(
+                profiles
+                    .discoverHashtags()
+                    .load(20, PagingRequest.Refresh)
+                    .data
+                    .isEmpty(),
+            )
+
+            val discoverOnly = authenticated(plugin, unavailableOperations = mapOf(search to setOf("profiles")))
+            val discover = requireNotNull(discoverOnly.capabilitySet.search)
+            assertFalse(discover.canSearch)
+            assertEquals(
+                "#trend",
+                discover
+                    .discoverHashtags()
+                    .load(20, PagingRequest.Refresh)
+                    .data
+                    .single()
+                    .hashtag,
+            )
+        }
+
+    @Test
+    fun partialCapabilitiesKeepHostEntrypointsAndMappedRoutesConsistent() =
+        runBlocking<Unit> {
+            val plugin = install()
+            for (missing in listOf("page", "badge")) {
+                val source =
+                    authenticated(
+                        plugin,
+                        unavailableOperations =
+                            mapOf(
+                                PluginAbiV1.Capabilities.NOTIFICATION to setOf(missing),
+                                PluginAbiV1.Capabilities.ARTICLE to setOf("comments"),
+                            ),
+                    )
+                val notification = requireNotNull(source.capabilitySet.notification)
+                assertEquals(missing != "page", notification.timeline != null)
+                assertEquals(missing != "badge", notification.events != null)
+                assertEquals(null, source.capabilitySet.article)
+                assertEquals(ClickEvent.Noop, detailPosts(source)[2].clickEvent)
+                assertIs<ClickEvent.Deeplink>(detailPosts(source)[3].clickEvent)
+            }
+        }
+
+    @Test
+    fun accountAndGuestRequestsUseTheRunningPackagesHttpOrigins() =
+        runBlocking {
+            val requests = mutableListOf<PluginTransportRequestV1>()
+            runtimePool.close()
+            runtimePool =
+                PluginRuntimePool(
+                    fileSystem,
+                    object : PluginHttpTransport {
+                        override suspend fun execute(request: PluginTransportRequestV1): PluginTransportResponseV1 {
+                            requests += request
+                            return PluginTransportResponseV1(200, emptyMap(), "{}".encodeToByteArray())
+                        }
+                    },
+                )
+            val manifest =
+                MANIFEST
+                    .replace("\"mediaNetwork\": true", "\"mediaNetwork\": true, \"httpOrigins\": [\"https://api.example\"]")
+                    .replace("\"capabilities\": {", "\"guest\": {\"enabled\": true}, \"capabilities\": {")
+            val script =
+                SCRIPT.replace(
+                    "page(request) {",
+                    "async page(request) { await flare.http.request({url: 'https://api.example/data'});",
+                )
+            val plugin = install(manifest, script)
+            assertEquals(5, detailPosts(authenticated(plugin)).size)
+            assertEquals(5, detailPosts(PluginDataSourceV1.guest(plugin, runtimePool, ORIGIN, "en", emptyMap(), null)).size)
+            assertEquals(2, requests.size)
+            assertTrue(requests.all { it.url == "https://api.example/data" && it.headers.isEmpty() })
+            val removed = install(manifest.replace("\"httpOrigins\": [\"https://api.example\"]", "\"httpOrigins\": []"), script)
+            assertFailsWith<PluginRuntimeUnavailableException> { detailPosts(authenticated(removed)) }
+            assertFailsWith<PluginRuntimeUnavailableException> {
+                detailPosts(PluginDataSourceV1.guest(removed, runtimePool, ORIGIN, "en", emptyMap(), null))
+            }
+            assertEquals(2, requests.size)
+        }
+
+    @Test
+    fun guestsKeepDetailRoutesWithoutAccountCapabilities() =
+        runBlocking<Unit> {
+            val plugin = install(manifest = MANIFEST.replace("\"capabilities\": {", "\"guest\": {\"enabled\": true}, \"capabilities\": {"))
+            val source = PluginDataSourceV1.guest(plugin, runtimePool, ORIGIN, "en", emptyMap(), null)
+            val capabilities = source.capabilitySet
+            assertEquals(null, capabilities.relation)
+            assertEquals(null, capabilities.list)
+            assertEquals(null, capabilities.notification)
+            assertEquals(null, capabilities.directMessage)
+            assertEquals(null, capabilities.tabCatalog)
+            assertTrue(capabilities.article != null)
+            assertTrue(capabilities.gallery != null)
+            val posts = detailPosts(source)
+            assertIs<DeeplinkRoute.Article>(DeeplinkRoute.parse(assertIs<ClickEvent.Deeplink>(posts[2].clickEvent).url))
+            assertIs<DeeplinkRoute.Gallery.Detail>(DeeplinkRoute.parse(assertIs<ClickEvent.Deeplink>(posts[3].clickEvent).url))
+        }
+
+    @Test
+    fun pluginTimelinesRemainAvailableToMixedTimelineLoaders() =
+        runBlocking<Unit> {
+            val plugin = install()
+            val source = authenticated(plugin)
+            val first =
+                assertIs<CacheableRemoteLoader<*>>(
+                    source.timeline("dynamic-feed", mapOf("kind" to "photos", "sort" to "new")),
+                )
+            val reordered =
+                assertIs<CacheableRemoteLoader<*>>(
+                    source.timeline("dynamic-feed", mapOf("sort" to "new", "kind" to "photos")),
+                )
+            val another =
+                assertIs<CacheableRemoteLoader<*>>(
+                    source.timeline("dynamic-feed", mapOf("kind" to "details")),
+                )
+            assertEquals(first.pagingKey, reordered.pagingKey)
+            assertTrue(first.pagingKey != another.pagingKey)
+            assertEquals(false, first.supportPrepend)
+            assertEquals(
+                listOf("post-1"),
+                source
+                    .timeline("dynamic-feed", mapOf("kind" to "photos"))
+                    .load(20, PagingRequest.Refresh)
+                    .data
+                    .map { it.statusKey.id },
+            )
+            assertIs<CacheableRemoteLoader<*>>(
+                source.extraCapabilities.listAdapter!!.listTimeline("list-1"),
+            )
+            val notifications = requireNotNull(source.capabilitySet.notification?.timeline)
+            assertTrue(
+                assertIs<CacheableRemoteLoader<*>>(notifications.notification(NotificationFilter.All)).pagingKey !=
+                    assertIs<CacheableRemoteLoader<*>>(notifications.notification(NotificationFilter.Mention)).pagingKey,
+            )
+            val otherAccount = authenticated(plugin, accountKey = MicroBlogKey("account-2", "plugin.example"))
+            val otherOrigin =
+                authenticated(plugin, accountKey = MicroBlogKey("account-1", "plugin.example:8443"), origin = "https://plugin.example:8443")
+            val upgraded = authenticated(plugin.copy(installed = plugin.installed.copy(packageHash = "f".repeat(64))))
+            val keys =
+                listOf(source, otherAccount, otherOrigin, upgraded).map {
+                    assertIs<CacheableRemoteLoader<*>>(it.timeline("dynamic-feed", mapOf("kind" to "photos"))).pagingKey
+                }
+            assertEquals(4, keys.toSet().size)
+            val prepend =
+                authenticated(install(MANIFEST.replace("\"directions\": [\"refresh\"]", "\"directions\": [\"refresh\", \"newer\"]")))
+            assertTrue(assertIs<CacheableRemoteLoader<*>>(prepend.timeline("dynamic-feed")).supportPrepend)
+        }
+
+    @Test
+    fun composeBridgePreservesReplyAndQuoteWithoutLegacyFields() =
+        runBlocking {
+            val source = authenticated(installCompose()).capabilitySet.compose!!
+            source.compose(ComposeData("new post")) {}
+            val normal = Json.parseToJsonElement(assertIs<PluginTransportBodyV1.Text>(transport.requests.last().body).value).jsonObject
+            assertFalse("reference" in normal || "replyTo" in normal)
+            val target = MicroBlogKey("opaque/42", "remote.example")
+            for ((type, status) in listOf("reply" to ComposeStatus.Reply(target), "quote" to ComposeStatus.Quote(target))) {
+                source.compose(ComposeData("caption", referenceStatus = ComposeData.ReferenceStatus(status))) {}
+                val payload = Json.parseToJsonElement(assertIs<PluginTransportBodyV1.Text>(transport.requests.last().body).value).jsonObject
+                val reference = payload["reference"]?.jsonObject
+                assertEquals(type, reference?.get("type")?.jsonPrimitive?.content)
+                assertEquals(
+                    target.id,
+                    reference
+                        ?.get("key")
+                        ?.jsonObject
+                        ?.get("id")
+                        ?.jsonPrimitive
+                        ?.content,
+                )
+                assertEquals(
+                    target.host,
+                    reference
+                        ?.get("key")
+                        ?.jsonObject
+                        ?.get("host")
+                        ?.jsonPrimitive
+                        ?.content,
+                )
+                assertFalse("replyTo" in payload || "quoteTo" in payload)
+            }
+        }
+
+    @Test
+    fun privateComposeUsesNegotiatedCapabilityAndIndependentLegacyDefaults() =
+        runBlocking {
+            val manifest =
+                MANIFEST.replace(
+                    "\"capabilities\": {",
+                    """
+                    "composeDefaults": { "supportedTypes": ["new"], "visibility": { "allowed": ["followers"], "default": "followers" } },
+                    "composeDefaultsV3": {
+                      "supportedTypes": ["new"],
+                      "visibility": { "allowed": ["friends", "selfOnly"], "default": "selfOnly" }
+                    },
+                    "capabilities": {
+                      "${PluginAbiV1.Capabilities.COMPOSE}": { "operations": { "publish": {} } },
+                      "${PluginAbiV1.Capabilities.COMPOSE_V3}": { "operations": { "publish": {} } },
+                    """.trimIndent(),
+                )
+            val script =
+                SCRIPT.replace(
+                    "defineFlareSocialPlugin({ capabilities: {",
+                    """
+                    function recordCompose(handler) {
+                      return { async publish(request, context) {
+                        await flare.http.request({ url: context.origin + "/record", method: "POST",
+                          body: { type: "json", value: { handler, visibility: request.visibility } } });
+                        return { post: post("published") };
+                      } };
+                    }
+                    defineFlareSocialPlugin({ capabilities: {
+                      compose: recordCompose("legacy"),
+                      composeV3: recordCompose("extended"),
+                    """.trimIndent(),
+                )
+            val plugin = install(manifest, script)
+            val extended = requireNotNull(authenticated(plugin).capabilitySet.compose)
+            assertEquals(UiTimelineV2.Post.Visibility.SelfOnly, extended.composeConfig(ComposeType.New).visibility?.defaultVisibility)
+            for ((scope, expected) in listOf(
+                UiTimelineV2.Post.Visibility.Friends to "friends",
+                UiTimelineV2.Post.Visibility.SelfOnly to "selfOnly",
+            )) {
+                extended.compose(ComposeData("private post", visibility = scope)) {}
+                val payload = Json.parseToJsonElement(assertIs<PluginTransportBodyV1.Text>(transport.requests.last().body).value).jsonObject
+                assertEquals("extended", payload["handler"]?.jsonPrimitive?.content)
+                assertEquals(expected, payload["visibility"]?.jsonPrimitive?.content)
+            }
+            val legacy = requireNotNull(authenticated(plugin, setOf(PluginAbiV1.Capabilities.COMPOSE_V3)).capabilitySet.compose)
+            assertEquals(UiTimelineV2.Post.Visibility.Followers, legacy.composeConfig(ComposeType.New).visibility?.defaultVisibility)
+            assertFailsWith<IllegalArgumentException> {
+                legacy.publish(ComposeData("private post", visibility = UiTimelineV2.Post.Visibility.SelfOnly)) {}
+            }
+            assertEquals(2, transport.requests.size)
+            legacy.compose(ComposeData("followers post", visibility = UiTimelineV2.Post.Visibility.Followers)) {}
+            val payload = Json.parseToJsonElement(assertIs<PluginTransportBodyV1.Text>(transport.requests.last().body).value).jsonObject
+            assertEquals("legacy", payload["handler"]?.jsonPrimitive?.content)
+            assertEquals("followers", payload["visibility"]?.jsonPrimitive?.content)
+        }
+
+    @Test
+    fun unsupportedComposeTypesAndEmptyQuotesFailBeforePluginCalls() =
+        runBlocking {
+            installCompose().let { running ->
+                val source = authenticated(running).capabilitySet.compose!!
+                assertFailsWith<IllegalArgumentException> {
+                    source.compose(
+                        ComposeData(
+                            "",
+                            referenceStatus = ComposeData.ReferenceStatus(ComposeStatus.Quote(MicroBlogKey("target", "remote.example"))),
+                        ),
+                    ) {
+                    }
+                }
+            }
+            assertTrue(transport.requests.isEmpty())
+            val restricted = installCompose(supportedTypes = "\"new\", \"reply\"")
+            val source = authenticated(restricted).capabilitySet.compose!!
+            val quote =
+                ComposeData(
+                    "caption",
+                    visibility = UiTimelineV2.Post.Visibility.Public,
+                    referenceStatus = ComposeData.ReferenceStatus(ComposeStatus.Quote(MicroBlogKey("target", "remote.example"))),
+                )
+            var progress = 0
+            assertFailsWith<IllegalArgumentException> { source.compose(quote) { progress++ } }
+            assertFailsWith<IllegalArgumentException> { source.publish(quote) { progress++ } }
+            assertEquals(0, progress)
+            assertTrue(transport.requests.isEmpty())
+        }
+
+    @Test
+    fun quoteCannotUseTheReplyMediaExemption() =
+        runBlocking {
+            val source = authenticated(installCompose(minimumMedia = 1)).capabilitySet.compose!!
+            val target = MicroBlogKey("target", "remote.example")
+            assertFailsWith<IllegalArgumentException> {
+                source.compose(ComposeData("caption", referenceStatus = ComposeData.ReferenceStatus(ComposeStatus.Quote(target)))) {}
+            }
+            assertTrue(transport.requests.isEmpty())
+            source.compose(ComposeData("caption", referenceStatus = ComposeData.ReferenceStatus(ComposeStatus.Reply(target)))) {}
+            assertEquals(1, transport.requests.size)
+        }
+
+    private suspend fun installCompose(
+        minimumMedia: Int = 0,
+        supportedTypes: String = "\"new\", \"reply\", \"quote\"",
+    ): RunningPluginV1 {
+        val manifest =
+            MANIFEST.replace(
+                "\"capabilities\": {",
+                """
+                "composeDefaults": {
+                  "supportedTypes": [$supportedTypes], "text": { "maxLength": 1000 },
+                  "media": { "minCountForNew": $minimumMedia, "maxCount": 4, "maxBytes": 1000000 }
+                },
+                "capabilities": { "${PluginAbiV1.Capabilities.COMPOSE}": { "operations": { "publish": {} } },
+                """.trimIndent(),
+            )
+        val script =
+            SCRIPT.replace(
+                "defineFlareSocialPlugin({ capabilities: {",
+                """
+                defineFlareSocialPlugin({ capabilities: {
+                  compose: { async publish(request, context) {
+                    await flare.http.request({ url: context.origin + "/record", method: "POST", body: { type: "json", value: request } });
+                    return { post: post("published") };
+                  } },
+                """.trimIndent(),
+            )
+        return install(manifest, script)
+    }
+
+    @Test
+    fun composeWithoutProfileCapabilityKeepsThePersistedLoginProfile() =
+        runBlocking<Unit> {
+            val manifest =
+                MANIFEST.replace(
+                    "\"capabilities\": {",
+                    """
+                    "composeDefaults": { "supportedTypes": ["new", "reply", "quote"], "text": { "maxLength": 1000 } },
+                    "capabilities": { "flare.datasource.compose/v2": { "operations": { "publish": {} } },
+                    """.trimIndent(),
+                )
+            val script =
+                SCRIPT.replace(
+                    "defineFlareSocialPlugin({ capabilities: {",
+                    """
+                    defineFlareSocialPlugin({ capabilities: {
+                    compose: { publish() { return { post: post("published") }; } },
+                    """.trimIndent(),
+                )
+            val dataSource = authenticated(install(manifest, script))
+            assertEquals(null, dataSource.capabilitySet.profile)
+            assertTrue(dataSource.capabilitySet.compose != null)
+            val profile = dataSource.authenticatedProfile
+            assertEquals(MicroBlogKey("account-1", "plugin.example"), profile?.key)
+            assertEquals("Test", profile?.name?.raw)
+        }
+
+    @Test
+    fun directMessagePollingAdvancesPageCursorsEvenWhenThePageIsEmpty() =
+        runBlocking {
+            val source = authenticated(install(script = directMessagePagingScript()))
+            val loader = requireNotNull(source.extraCapabilities.directMessageAdapter).loader
+            val room = MicroBlogKey("room-1", "plugin.example")
+            val page = loader.loadMessages(room, 20, PagingRequest.Refresh)
+            val persistedCursor = page.data.single().remoteCursor
+            assertEquals("room-1-after-refresh", page.previousKey)
+            assertEquals(page.previousKey, persistedCursor)
+            assertTrue(loader.fetchNewMessages(room, persistedCursor).messages.isEmpty())
+
+            val next = loader.fetchNewMessages(room, persistedCursor).messages.single()
+            assertEquals("newer:room-1-after-empty", assertIs<UiDMItem.Message.Text>(next.content).text.raw)
+            assertEquals("room-1-after-newer", next.remoteCursor)
+            loader.deleteMessage(room, next.key)
+        }
+
+    @Test
+    fun directMessagePollingKeepsRoomCursorsWhenLoadingHistoryOrSending() =
+        runBlocking {
+            val source = authenticated(install(script = directMessagePagingScript()))
+            val loader = requireNotNull(source.extraCapabilities.directMessageAdapter).loader
+            val firstRoom = MicroBlogKey("room-1", "plugin.example")
+            val secondRoom = MicroBlogKey("room-2", "plugin.example")
+            loader.loadMessages(firstRoom, 20, PagingRequest.Refresh)
+            loader.loadMessages(secondRoom, 20, PagingRequest.Refresh)
+            loader.loadMessages(firstRoom, 20, PagingRequest.Append("older"))
+            val sent = loader.sendMessage(firstRoom, "hello")
+            assertEquals("room-1-after-refresh", sent.remoteCursor)
+            assertTrue(loader.fetchNewMessages(firstRoom, sent.remoteCursor).messages.isEmpty())
+            assertTrue(loader.fetchNewMessages(secondRoom, null).messages.isEmpty())
+        }
+
+    @Test
+    fun directMessagePollingResumesAPersistedCursorWithANewAdapter() =
+        runBlocking {
+            val plugin = install(script = directMessagePagingScript())
+            val first = requireNotNull(authenticated(plugin).extraCapabilities.directMessageAdapter).loader
+            val room = MicroBlogKey("room-1", "plugin.example")
+            val persisted = first.loadMessages(room, 20, PagingRequest.Refresh).data.single()
+            val restored = requireNotNull(authenticated(plugin).extraCapabilities.directMessageAdapter).loader
+            assertTrue(restored.fetchNewMessages(room, persisted.remoteCursor).messages.isEmpty())
+            val next = restored.fetchNewMessages(room, persisted.remoteCursor).messages.single()
+            assertEquals("newer:room-1-after-empty", assertIs<UiDMItem.Message.Text>(next.content).text.raw)
+        }
+
+    @Test
+    fun directMessagePollingRetriesTheCursorWhenMappingFails() =
+        runBlocking {
+            val script =
+                "var attempts = 0;\n" +
+                    directMessagePagingScript().replace(
+                        "sender: profile,",
+                        """
+                        sender: direction === "newer" && attempts++ === 0
+                          ? Object.assign({}, profile, { avatarUrl: "https://plugin.example/denied.png" }) : profile,
+                        """.trimIndent(),
+                    )
+            val source = authenticated(install(MANIFEST.replace("\"mediaNetwork\": true", "\"mediaNetwork\": false"), script))
+            val loader = requireNotNull(source.extraCapabilities.directMessageAdapter).loader
+            val room = MicroBlogKey("room-1", "plugin.example")
+            val cursor =
+                loader
+                    .loadMessages(room, 20, PagingRequest.Refresh)
+                    .data
+                    .single()
+                    .remoteCursor
+            assertTrue(loader.fetchNewMessages(room, cursor).messages.isEmpty())
+            assertFailsWith<IllegalArgumentException> { loader.fetchNewMessages(room, cursor) }
+            val retried = loader.fetchNewMessages(room, cursor).messages.single()
+            assertEquals("newer:room-1-after-empty", assertIs<UiDMItem.Message.Text>(retried.content).text.raw)
+        }
+
+    private fun directMessagePagingScript(): String =
+        SCRIPT
+            .replace(
+                "messages() { return { items: [] }; },",
+                """
+                messages(request) {
+                  const room = request.roomKey.id;
+                  const direction = request.page.direction;
+                  if (direction === "newer" && request.page.cursor === room + "-after-refresh") {
+                    return { items: [], newerCursor: room + "-after-empty" };
+                  }
+                  return {
+                    items: [{
+                      key: { id: room + "-" + direction, host: "plugin.example" },
+                      roomKey: request.roomKey,
+                      sender: profile,
+                      createdAt: "2026-01-01T00:00:00Z",
+                      content: { value: direction + ":" + (request.page.cursor || "initial") },
+                      entityToken: "message-token"
+                    }],
+                    newerCursor: room + "-after-" + direction
+                  };
+                },
+                """.trimIndent(),
+            ).replace(
+                "delete() { return { type: \"deleted\" }; },",
+                """
+                delete(request) {
+                  if (request.messageEntityToken !== "message-token") throw new Error("Missing message entity token");
+                  return { type: "deleted" };
+                },
+                """.trimIndent(),
+            )
+
+    @Test
+    fun coldListAndDirectMessageDetailsCallDedicatedPluginMethods() =
+        runBlocking {
+            val plugin = install()
+            val accountKey = MicroBlogKey("account-1", "plugin.example")
+            val dataSource = authenticated(plugin)
+
+            val listAdapter = requireNotNull(dataSource.extraCapabilities.listAdapter)
+            assertEquals("Cold list", listAdapter.info("list-1").title)
+            assertEquals("Updated", listAdapter.update("list-1", ListMetaData(title = "Updated")).title)
+            assertTrue(
+                listAdapter
+                    .listTimeline("list-1")
+                    .load(20, PagingRequest.Refresh)
+                    .data
+                    .isEmpty(),
+            )
+
+            val roomKey = MicroBlogKey("room-1", accountKey.host)
+            val directMessage = requireNotNull(dataSource.extraCapabilities.directMessageAdapter)
+            assertEquals(roomKey, directMessage.roomInfo(roomKey).key)
+            assertTrue(directMessage.canSendDirectMessage(MicroBlogKey("user-1", accountKey.host)))
+
+            val relation = requireNotNull(dataSource.capabilitySet.relation)
+            assertEquals(
+                setOf(RelationActionType.Follow),
+                relation.supportedRelationTypes,
+            )
+            val relationLoader = relation.relationHandler.dataSource
+            assertEquals(false, relationLoader.relation(MicroBlogKey("user-1", accountKey.host)).following)
+            relationLoader.follow(MicroBlogKey("user-1", accountKey.host))
+
+            val notification = requireNotNull(dataSource.capabilitySet.notification)
+            val notificationTimeline = requireNotNull(notification.timeline)
+            assertEquals(
+                listOf(NotificationFilter.All, NotificationFilter.Mention),
+                notificationTimeline.supportedNotificationFilter,
+            )
+            assertTrue(
+                notificationTimeline
+                    .notification()
+                    .load(20, PagingRequest.Refresh)
+                    .data
+                    .isEmpty(),
+            )
+            assertEquals(0, requireNotNull(notification.events).notificationHandler.loader.notificationBadgeCount())
+
+            val articleKey = MicroBlogKey("article-1", accountKey.host)
+            val article = requireNotNull(dataSource.capabilitySet.article)
+            assertEquals("Plugin article", article.article(articleKey).title)
+            assertTrue(
+                article
+                    .articleComments(articleKey)
+                    .load(20, PagingRequest.Refresh)
+                    .data
+                    .isEmpty(),
+            )
+
+            val galleryKey = MicroBlogKey("gallery-1", accountKey.host)
+            val gallery = requireNotNull(dataSource.capabilitySet.gallery)
+            val galleryDetail = gallery.galleryDetail(galleryKey)
+            assertIs<LoadState.NotLoading>(galleryDetail.refreshState.first { it !is LoadState.Loading })
+            assertEquals(
+                "Plugin gallery",
+                assertIs<CacheState.Success<GalleryDetail>>(galleryDetail.data.first { it is CacheState.Success }).data.title,
+            )
+            assertTrue(
+                gallery
+                    .galleryComments(galleryKey)
+                    .load(20, PagingRequest.Refresh)
+                    .data
+                    .isEmpty(),
+            )
+            assertTrue(
+                gallery
+                    .galleryRecommendations(galleryKey)
+                    .load(20, PagingRequest.Refresh)
+                    .data
+                    .isEmpty(),
+            )
+
+            assertEquals(
+                1,
+                dataSource
+                    .timeline("dynamic-feed", mapOf("kind" to "photos"))
+                    .load(20, PagingRequest.Refresh)
+                    .data.size,
+            )
+        }
+
+    @Test
+    fun readOnlyListBlocksWritesEvenBeforeItsDetailHasBeenLoaded() =
+        runBlocking {
+            val script = SCRIPT.replace("title: \"Cold list\",", "title: \"Cold list\", readOnly: true,")
+            val adapter = requireNotNull(authenticated(install(script = script)).extraCapabilities.listAdapter)
+            assertFailsWith<IllegalArgumentException> { adapter.update("list-1", ListMetaData(title = "Changed")) }
+            assertTrue(adapter.info("list-1").readonly)
+        }
+
+    @Test
+    fun membershipResultsRefreshReadOnlyStateWithoutDroppingTheListToken() =
+        runBlocking {
+            val script =
+                SCRIPT.replace(
+                    "memberships() { return { items: [] }; },",
+                    """
+                    memberships(request) {
+                      const item = { id: "list-1", title: "List" };
+                      if (request.key.id !== "unknown") item.readOnly = request.key.id === "viewer";
+                      return { items: [item] };
+                    },
+                    """.trimIndent(),
+                )
+            val adapter = requireNotNull(authenticated(install(script = script)).extraCapabilities.listAdapter)
+            val members = adapter.memberLoader
+            val viewer = MicroBlogKey("viewer", "plugin.example")
+            assertFalse(adapter.info("list-1").readonly)
+            assertTrue(
+                members
+                    .loadUserLists(20, PagingRequest.Refresh, viewer)
+                    .data
+                    .single()
+                    .readonly,
+            )
+            assertTrue(
+                members
+                    .loadUserLists(20, PagingRequest.Refresh, viewer.copy(id = "unknown"))
+                    .data
+                    .single()
+                    .readonly,
+            )
+            assertFailsWith<IllegalArgumentException> { adapter.update("list-1", ListMetaData(title = "Changed")) }
+            assertFailsWith<IllegalArgumentException> { members.addMember("list-1", viewer) }
+            assertFailsWith<IllegalArgumentException> { members.removeMember("list-1", viewer) }
+
+            members.loadUserLists(20, PagingRequest.Refresh, viewer.copy(id = "editor"))
+            assertEquals("Changed", adapter.update("list-1", ListMetaData(title = "Changed")).title)
+        }
+
+    @Test
+    fun mixedTimelinePostsUseTheirSelectedDetailRoutes() =
+        runBlocking {
+            val dataSource = authenticated(install())
+            val accountType = AccountType.Specific(MicroBlogKey("account-1", "plugin.example"))
+            val posts = detailPosts(dataSource)
+
+            assertEquals(
+                listOf(
+                    ClickEvent.Deeplink(DeeplinkRoute.Status.Detail(MicroBlogKey("default", "plugin.example"), accountType)),
+                    ClickEvent.Deeplink(DeeplinkRoute.Status.Detail(MicroBlogKey("post", "plugin.example"), accountType)),
+                    ClickEvent.Deeplink(DeeplinkRoute.Article(accountType, MicroBlogKey("article", "plugin.example"))),
+                    ClickEvent.Deeplink(DeeplinkRoute.Gallery.Detail(MicroBlogKey("gallery", "plugin.example"), accountType)),
+                    ClickEvent.Deeplink(DeeplinkRoute.OpenLinkDirectly("https://plugin.example/posts/link")),
+                ),
+                posts.map { it.clickEvent },
+            )
+        }
+
+    @Test
+    fun detailLinksRequireTheNegotiatedTargetCapability() =
+        runBlocking {
+            val dataSource =
+                authenticated(
+                    install(),
+                    unavailableCapabilities = setOf(PluginAbiV1.Capabilities.ARTICLE, PluginAbiV1.Capabilities.GALLERY),
+                )
+            val posts = detailPosts(dataSource)
+
+            assertIs<ClickEvent.Deeplink>(posts[0].clickEvent)
+            assertIs<ClickEvent.Deeplink>(posts[1].clickEvent)
+            assertEquals(ClickEvent.Noop, posts[2].clickEvent)
+            assertEquals(ClickEvent.Noop, posts[3].clickEvent)
+            assertEquals(ClickEvent.Deeplink(DeeplinkRoute.OpenLinkDirectly("https://plugin.example/posts/link")), posts[4].clickEvent)
+        }
+
+    @Test
+    fun articleAndGalleryLinksDoNotRequirePostDetail() =
+        runBlocking<Unit> {
+            val dataSource = authenticated(install(), unavailableCapabilities = setOf(PluginAbiV1.Capabilities.POST))
+            val posts = detailPosts(dataSource)
+
+            assertEquals(ClickEvent.Noop, posts[0].clickEvent)
+            assertEquals(ClickEvent.Noop, posts[1].clickEvent)
+            assertIs<DeeplinkRoute.Article>(DeeplinkRoute.parse(assertIs<ClickEvent.Deeplink>(posts[2].clickEvent).url))
+            assertIs<DeeplinkRoute.Gallery.Detail>(DeeplinkRoute.parse(assertIs<ClickEvent.Deeplink>(posts[3].clickEvent).url))
+        }
+
+    @Test
+    fun linkPostsDoNotRequireAnyDetailCapability() =
+        runBlocking {
+            val source =
+                authenticated(
+                    install(),
+                    unavailableCapabilities =
+                        setOf(
+                            PluginAbiV1.Capabilities.POST,
+                            PluginAbiV1.Capabilities.ARTICLE,
+                            PluginAbiV1.Capabilities.GALLERY,
+                        ),
+                )
+            val posts = detailPosts(source)
+            assertTrue(posts.take(4).all { it.clickEvent == ClickEvent.Noop })
+            assertEquals(ClickEvent.Deeplink(DeeplinkRoute.OpenLinkDirectly("https://plugin.example/posts/link")), posts[4].clickEvent)
+            assertEquals(UiTimelineV2.Post.MediaClickPolicy.OpenPostClickEvent, posts[4].mediaClickPolicy)
+        }
+
+    @Test
+    fun packageMissingDedicatedDetailMethodIsRejected() =
+        runBlocking {
+            val input = root / "missing-detail.fpp"
+            TestFppFactory.write(input, TestFppFactory.validEntries(manifest = MANIFEST, script = SCRIPT.replace(LIST_DETAIL, "")))
+            val store = PluginStateStore.open(fileSystem, root / "missing-detail-store")
+
+            val error = runCatching { PluginInstaller(fileSystem, store).inspect(input) }.exceptionOrNull()
+
+            assertTrue(error != null && "capabilities.list.detail" in error.message.orEmpty())
+        }
+
+    @Test
+    fun galleryBookmarkRefreshesOpenDetailsAfterUpdatedPostAndFailedMutation() =
+        assertGalleryMutationRefreshes("{ type: 'updatedPost', post: post(request.key.id) }")
+
+    @Test
+    fun galleryBookmarkRefreshesOpenDetailsAfterInvalidation() =
+        assertGalleryMutationRefreshes("{ type: 'invalidate', keys: [request.key] }")
+
+    @Test
+    fun galleryBookmarkRefreshesOpenDetailsWhenMutationReturnsNoPost() = assertGalleryMutationRefreshes("{ type: 'noChange' }")
+
+    private fun assertGalleryMutationRefreshes(result: String) =
+        runBlocking {
+            val plugin =
+                install(
+                    manifest = MANIFEST.replace("\"detail\": {} } },", "\"detail\": {}, \"mutate\": {} } },"),
+                    script =
+                        "let bookmarked = false;\n" +
+                            SCRIPT
+                                .replace(
+                                    "post: { detail(request)",
+                                    """post: { mutate(request) {
+                                if (request.actionToken === "fail") throw flare.error({ code: "Network", message: { key: "error.network", fallback: "temporary failure" } });
+                                if (request.action !== (bookmarked ? "Unbookmark" : "Bookmark")) throw new Error("stale bookmark action");
+                                bookmarked = !bookmarked;
+                                return $result;
+                            }, detail(request)""",
+                                ).replace(
+                                    "title: \"Plugin gallery\",",
+                                    "title: \"Plugin gallery\", actions: [{ action: bookmarked ? 'Unbookmark' : 'Bookmark', active: bookmarked }],",
+                                ),
+                )
+            val source = authenticated(plugin)
+            val gallery = requireNotNull(source.capabilitySet.gallery)
+            val key = MicroBlogKey("gallery-1", "plugin.example")
+            val cache = gallery.galleryDetail(key)
+            val observer = CoroutineScope(coroutineContext + Job(coroutineContext.job))
+            val visible = cache.data.stateIn(observer, SharingStarted.Eagerly, CacheState.Empty())
+            val anotherView = gallery.galleryDetail(key)
+            val secondObserver = CoroutineScope(coroutineContext + Job(coroutineContext.job))
+            val secondVisible = anotherView.data.stateIn(secondObserver, SharingStarted.Eagerly, CacheState.Empty())
+            val secondRefresh = launch { anotherView.refreshState.collect { if (it is LoadState.Error) throw it.error } }
+            val refresh = launch { cache.refreshState.collect { if (it is LoadState.Error) throw it.error } }
+            try {
+                suspend fun detail(bookmarked: Boolean): GalleryDetail =
+                    withTimeout(10_000) {
+                        assertIs<CacheState.Success<GalleryDetail>>(
+                            visible.first { it is CacheState.Success && it.data.isBookmarked == bookmarked },
+                        ).data
+                    }
+                val before = detail(false)
+                withTimeout(10_000) { secondVisible.first { it is CacheState.Success } }
+                val handler = source.postMutationHandler
+                val updater = RecordingDatabaseUpdater()
+                val bookmark = assertIs<PostEvent.Semantic>(requireNotNull(before.bookmarkAction.postEventOrNull()).postEvent)
+                assertFailsWith<PluginCallException> { handler.handle(bookmark.copy(actionToken = "fail"), updater) }
+                assertEquals(0, updater.updates)
+                assertEquals(
+                    false,
+                    assertIs<CacheState.Success<GalleryDetail>>(visible.first { it is CacheState.Success }).data.isBookmarked,
+                )
+
+                handler.handle(bookmark, updater)
+                assertEquals(if (result.contains("noChange")) 0 else 1, updater.updates)
+                val bookmarked = detail(true)
+                withTimeout(10_000) { secondVisible.first { it is CacheState.Success && it.data.isBookmarked } }
+                secondObserver.coroutineContext.job.cancelAndJoin()
+                handler.handle(requireNotNull(bookmarked.bookmarkAction.postEventOrNull()).postEvent, updater)
+                assertEquals(false, detail(false).isBookmarked)
+                assertEquals(
+                    true,
+                    assertIs<CacheState.Success<GalleryDetail>>(anotherView.data.first { it is CacheState.Success }).data.isBookmarked,
+                )
+            } finally {
+                observer.coroutineContext.job.cancelAndJoin()
+                secondObserver.coroutineContext.job.cancelAndJoin()
+                secondRefresh.cancelAndJoin()
+                refresh.cancelAndJoin()
+            }
+        }
+
+    private suspend fun detailPosts(dataSource: PluginDataSourceV1): List<UiTimelineV2.Post> =
+        dataSource
+            .timeline("dynamic-feed", mapOf("kind" to "details"))
+            .load(20, PagingRequest.Refresh)
+            .data
+            .map { assertIs<UiTimelineV2.TimelinePostItem>(it).post }
+
+    private suspend fun authenticated(
+        plugin: RunningPluginV1,
+        unavailableCapabilities: Set<String> = emptySet(),
+        unavailableOperations: Map<String, Set<String>> = emptyMap(),
+        accountKey: MicroBlogKey = MicroBlogKey("account-1", "plugin.example"),
+        origin: String = ORIGIN,
+    ): PluginDataSourceV1 {
+        val success =
+            LoginSuccessV1(
+                accountId = accountKey.id,
+                origin = origin,
+                credential = JsonObject(emptyMap()),
+                profile = ProfileV1(EntityKeyV1(accountKey.id, accountKey.host), "test@plugin.example", "Test"),
+                capabilities =
+                    plugin.installed.manifest.socialPlatform.capabilities
+                        .filterKeys { it !in unavailableCapabilities }
+                        .mapValues { (id, declaration) -> declaration.operations.keys - unavailableOperations[id].orEmpty() },
+            )
+        return PluginDataSourceV1.authenticated(
+            plugin = plugin,
+            runtimePool = runtimePool,
+            context = MemoryPlatformContext(accountKey, plugin.accountCredential(success)),
+            timelineSpecs = emptyMap(),
+            dynamicTimelineSpec = null,
+            coroutineScope = scope,
+        )
+    }
+
+    private suspend fun install(
+        manifest: String = MANIFEST,
+        script: String = SCRIPT,
+    ): RunningPluginV1 {
+        val input = root / "plugin.fpp"
+        TestFppFactory.write(input, TestFppFactory.validEntries(manifest = manifest, script = script))
+        val namespace = root / "plugin-store"
+        val store = PluginStateStore.open(fileSystem, namespace)
+        PluginInstaller(fileSystem, store).let { installer ->
+            installer.inspect(input).also { installer.commit(it, true, activate = store::install) }
+        }
+        return PluginStateStore
+            .open(fileSystem, namespace)
+            .running.plugins
+            .values
+            .single()
+    }
+}
+
+private class MemoryPlatformContext(
+    override val accountKey: MicroBlogKey,
+    private var value: PluginAccountCredentialV1,
+) : PlatformDataSourceContext {
+    private val mutex = Mutex()
+
+    override suspend fun <T : Any> mutateCredential(
+        serializer: KSerializer<T>,
+        update: (T) -> T?,
+    ): T? =
+        mutex.withLock {
+            update(credential(serializer))?.also { value = it as PluginAccountCredentialV1 }
+        }
+
+    override fun <T : Any> credential(serializer: KSerializer<T>): T {
+        @Suppress("UNCHECKED_CAST")
+        return value as T
+    }
+
+    override fun <T : Any> credentialFlow(serializer: KSerializer<T>): Flow<T> = flowOf(credential(serializer))
+
+    override suspend fun <T : Any> updateCredential(
+        serializer: KSerializer<T>,
+        credential: T,
+    ) {
+        value = credential as PluginAccountCredentialV1
+    }
+}
+
+private class NoopTransport : PluginHttpTransport {
+    val requests = mutableListOf<PluginTransportRequestV1>()
+
+    override suspend fun execute(request: PluginTransportRequestV1): PluginTransportResponseV1 {
+        requests += request
+        return PluginTransportResponseV1(200, emptyMap(), "{}".encodeToByteArray())
+    }
+}
+
+private const val MANIFEST =
+    """
+    {
+      "schemaVersion": 1,
+      "apiVersion": 1,
+      "id": "dev.dimension.flare.test.detail",
+      "version": "1.0.0",
+      "name": "Detail test",
+      "permissions": { "mediaNetwork": true },
+      "platform": {
+        "id": "DetailTest",
+        "name": "Detail test",
+        "capabilities": {
+          "flare.datasource.list/v1": { "operations": {
+            "page": {}, "detail": {}, "create": {}, "update": {}, "delete": {}, "timeline": {},
+            "members": {}, "memberships": {}, "addMember": {}, "removeMember": {}
+          } },
+          "flare.datasource.direct-message/v1": { "operations": {
+            "rooms": {}, "room": {}, "messages": {}, "send": {}, "delete": {}, "leave": {},
+            "create": {}, "badge": {}, "canSend": {}
+          } },
+          "flare.datasource.relation/v1": {
+            "operations": { "state": {}, "mutate": {} },
+            "relationActions": ["follow"]
+          },
+          "flare.datasource.notification/v1": {
+            "operations": { "page": { "directions": ["refresh"] }, "badge": {} },
+            "notificationFilters": ["all", "mention"]
+          },
+          "flare.datasource.article/v1": { "operations": {
+            "detail": {}, "comments": { "directions": ["refresh"] }
+          } },
+          "flare.datasource.gallery/v1": { "operations": {
+            "detail": {}, "comments": { "directions": ["refresh"] },
+            "recommendations": { "directions": ["refresh"] }
+          } },
+          "flare.datasource.timeline/v1": {
+            "operations": { "page": { "directions": ["refresh"] } }
+          },
+          "flare.datasource.post/v1": { "operations": { "detail": {} } },
+          "flare.datasource.tab-catalog/v1": {
+            "operations": { "page": { "directions": ["refresh"] } }
+          }
+        },
+        "timelines": [
+          { "id": "home", "title": "Home", "defaultForNewAccount": true }
+        ]
+      }
+    }
+    """
+
+private const val LIST_DETAIL =
+    """detail(request) { return { id: request.key.id, title: "Cold list", entityToken: "list-token" }; },"""
+
+private const val SCRIPT =
+    """
+    const profile = { key: { id: "account-1", host: "plugin.example" }, handle: "test@plugin.example", displayName: "Test" };
+    function post(id, detailType) {
+      const value = { key: { id, host: "plugin.example" }, author: profile, createdAt: "2026-01-01T00:00:00Z", content: { value: id } };
+      if (detailType) value.detailType = detailType;
+      if (detailType === "link") value.url = "https://plugin.example/posts/" + id;
+      return value;
+    }
+    defineFlareSocialPlugin({ capabilities: {
+      post: { detail(request) { return { post: post(request.key.id) }; } },
+      list: {
+        page() { return { items: [] }; },
+        $LIST_DETAIL
+        create(request) { return { id: "created", title: request.title || "Created" }; },
+        update(request) {
+          if (request.entityToken !== "list-token") throw new Error("missing list token");
+          return { id: request.id, title: request.title, entityToken: request.entityToken };
+        },
+        delete() { return { type: "deleted" }; },
+        timeline() { return { items: [] }; },
+        members() { return { items: [] }; },
+        memberships() { return { items: [] }; },
+        addMember() { return profile; },
+        removeMember() { return { type: "deleted" }; },
+      },
+      directMessage: {
+        rooms() { return { items: [] }; },
+        room(request) { return { key: request.key, title: "Cold room", participants: [profile], entityToken: "room-token" }; },
+        messages() { return { items: [] }; },
+        send(request) { return { key: { id: "message-1", host: "plugin.example" }, roomKey: request.roomKey, sender: profile, createdAt: "2026-01-01T00:00:00Z", content: { format: "plain", value: request.text } }; },
+        delete() { return { type: "deleted" }; },
+        leave() { return { type: "deleted" }; },
+        create() { return { key: { id: "room-1", host: "plugin.example" }, title: "Room", participants: [profile] }; },
+        badge() { return { value: 0 }; },
+        canSend() { return { value: true }; },
+      },
+      relation: {
+        state(request) { return { profileKey: request.key }; },
+        mutate() { return { type: "noChange" }; },
+      },
+      notification: {
+        page() { return { items: [] }; },
+        badge() { return { value: 0 }; },
+      },
+      article: {
+        detail(request) { return { key: request.key, title: "Plugin article", createdAt: "2026-01-01T00:00:00Z", content: { format: "plain", value: "Article body" }, url: "https://plugin.example/articles/article-1" }; },
+        comments() { return { items: [] }; },
+      },
+      gallery: {
+        detail(request) { return { key: request.key, title: "Plugin gallery", createdAt: "2026-01-01T00:00:00Z", content: { format: "plain", value: "Gallery body" }, url: "https://plugin.example/galleries/gallery-1", images: [{ id: "image-1", type: "image", url: "https://plugin.example/images/image-1.jpg" }] }; },
+        comments() { return { items: [] }; },
+        recommendations() { return { items: [] }; },
+      },
+      timeline: {
+        page(request) {
+          if (request.timelineId !== "dynamic-feed") throw new Error("bad timeline");
+          if (request.parameters.kind === "details") return { items: [post("default"), post("post", "post"), post("article", "article"), post("gallery", "gallery"), post("link", "link")].map(post => ({ type: "post", post })) };
+          if (request.parameters.kind !== "photos") throw new Error("bad timeline");
+          return { items: [{ type: "post", post: { key: { id: "post-1", host: "plugin.example" }, author: profile, createdAt: "2026-01-01T00:00:00Z", content: { value: "Dynamic" } } }] };
+        },
+      },
+      tabCatalog: {
+        page() { return { items: [] }; },
+      },
+    } });
+    """
+
+private const val PLUGIN_ID = "dev.dimension.flare.test.detail"
+private const val ORIGIN = "https://plugin.example"
+
+private class RecordingDatabaseUpdater(
+    var current: UiTimelineV2? = null,
+) : DatabaseUpdater {
+    var updates = 0
+    val deleted = mutableListOf<MicroBlogKey>()
+
+    override suspend fun updateCache(
+        postKey: MicroBlogKey,
+        update: suspend (UiTimelineV2) -> UiTimelineV2,
+    ) {
+        current?.let {
+            assertEquals(it.statusKey, postKey)
+            current = update(it)
+        }
+        updates++
+    }
+
+    override suspend fun deleteFromCache(postKey: MicroBlogKey) {
+        current?.let { assertEquals(it.statusKey, postKey) }
+        current = null
+        deleted += postKey
+        updates++
+    }
+
+    override suspend fun updateActionMenu(
+        postKey: MicroBlogKey,
+        newActionMenu: ActionMenu.Item,
+    ) = Unit
+}

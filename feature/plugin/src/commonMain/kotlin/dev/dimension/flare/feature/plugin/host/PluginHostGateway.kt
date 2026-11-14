@@ -1,0 +1,230 @@
+package dev.dimension.flare.feature.plugin.host
+
+import dev.dimension.flare.data.repository.RequireReLoginException
+import dev.dimension.flare.feature.plugin.abi.PluginJsonV1
+import dev.dimension.flare.feature.plugin.storage.PluginStorageAccessV1
+import dev.dimension.flare.feature.plugin.storage.PluginStorageChangesV1
+import dev.dimension.flare.feature.plugin.storage.PluginStorageSnapshotV1
+import dev.dimension.flare.feature.plugin.wire.HttpRequestV1
+import dev.dimension.flare.feature.plugin.wire.WireLimitsV1
+import kotlinx.coroutines.CancellationException
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+import okio.ByteString.Companion.toByteString
+
+internal class PluginHostGateway(
+    transport: PluginHttpTransport,
+) {
+    private val http = PluginHttpHost(transport)
+
+    suspend fun call(
+        operation: String,
+        argumentsJson: String,
+        context: PluginInvocationContextV1,
+        callTimeoutMillis: Long,
+        apiVersion: Int = 1,
+        storage: PluginStorageAccessV1? = null,
+    ): String {
+        require(argumentsJson.encodeToByteArray().size <= MAX_HOST_ARGUMENT_BYTES) { "Host arguments are too large" }
+        return try {
+            if (apiVersion >= 2) context.accountHttp?.ensureActive()
+            val value =
+                when (operation) {
+                    "account.http.request" -> {
+                        if (apiVersion < 2) throw PluginHostException("host.unsupported", "Account HTTP requires API v2")
+                        val access = context.accountHttp ?: throw PluginHostException("account.denied", "Account HTTP is unavailable")
+                        val request = PluginJsonV1.decodeFromString<HttpRequestV1>(argumentsJson)
+                        val response =
+                            try {
+                                http.execute(request, context, callTimeoutMillis, apiVersion, access)
+                            } catch (_: RequireReLoginException) {
+                                throw PluginHostException("account.authentication-required", "Account authentication requires login")
+                            }
+                        PluginJsonV1.encodeToJsonElement(
+                            dev.dimension.flare.feature.plugin.wire.HttpResponseV1
+                                .serializer(),
+                            response,
+                        )
+                    }
+
+                    "http.request" -> {
+                        val request = PluginJsonV1.decodeFromString<HttpRequestV1>(argumentsJson)
+                        if (apiVersion >= 2) context.credential?.ensureActive()
+                        val response = http.execute(request, context, callTimeoutMillis, apiVersion)
+                        if (apiVersion >= 2) context.credential?.ensureActive()
+                        PluginJsonV1.encodeToJsonElement(
+                            dev.dimension.flare.feature.plugin.wire.HttpResponseV1
+                                .serializer(),
+                            response,
+                        )
+                    }
+
+                    "storage.read" -> {
+                        if (apiVersion < 2) throw PluginHostException("host.unsupported", "Plugin storage requires API v2")
+                        context.credential?.ensureActive()
+                        val access = storage ?: throw PluginHostException("storage.unavailable", "Storage is unavailable")
+                        val request = PluginJsonV1.decodeFromString<StorageReadRequest>(argumentsJson)
+                        val snapshot = access.read(request.namespace, request.keys)
+                        context.credential?.ensureActive()
+                        PluginJsonV1.encodeToJsonElement(PluginStorageSnapshotV1.serializer(), snapshot)
+                    }
+
+                    "storage.write" -> {
+                        if (apiVersion < 2) throw PluginHostException("host.unsupported", "Plugin storage requires API v2")
+                        context.credential?.ensureActive()
+                        val access = storage ?: throw PluginHostException("storage.unavailable", "Storage is unavailable")
+                        val request = PluginJsonV1.decodeFromString<StorageWriteRequest>(argumentsJson)
+                        val snapshot = access.write(request.namespace, request.changes, request.expectedRevision)
+                        context.credential?.ensureActive()
+                        buildJsonObject { put("revision", snapshot.revision) }
+                    }
+
+                    "credential.read" -> {
+                        val request = PluginJsonV1.decodeFromString<CredentialReadRequestV2>(argumentsJson)
+                        if (apiVersion == 1) requireEmptyArguments(argumentsJson)
+                        val credential = context.credential ?: throw PluginHostException("credential.denied", "Credential is unavailable")
+                        if (request.withRevision) {
+                            val snapshot = credential.readVersioned()
+                            requireCredentialSize(snapshot.value)
+                            require(snapshot.revision.length in 1..256) { "Invalid credential revision" }
+                            PluginJsonV1.encodeToJsonElement(PluginCredentialSnapshot.serializer(), snapshot)
+                        } else {
+                            credential.read().also(::requireCredentialSize)
+                        }
+                    }
+
+                    "credential.replace" -> {
+                        val request = PluginJsonV1.decodeFromString<CredentialReplaceRequestV1>(argumentsJson)
+                        requireCredentialSize(request.value)
+                        val credential = context.credential ?: throw PluginHostException("credential.denied", "Credential is unavailable")
+                        if (request.expectedRevision != null) {
+                            require(
+                                apiVersion >= 2 && request.expectedRevision.length in 1..256,
+                            ) { "Conditional credentials require API v2 and a valid revision" }
+                            JsonPrimitive(credential.replaceIfCurrent(request.value, request.expectedRevision))
+                        } else {
+                            credential.replace(request.value)
+                            JsonPrimitive(true)
+                        }
+                    }
+
+                    "crypto.randomHex" -> {
+                        val request = PluginJsonV1.decodeFromString<RandomRequestV1>(argumentsJson)
+                        require(request.size in 1..MAX_RANDOM_BYTES) { "Invalid random byte count" }
+                        JsonPrimitive(platformSecureRandom(request.size).toByteString().hex())
+                    }
+
+                    "crypto.uuid" -> {
+                        requireEmptyArguments(argumentsJson)
+                        JsonPrimitive(platformUuid())
+                    }
+
+                    "crypto.md5", "crypto.sha256" -> {
+                        val request = PluginJsonV1.decodeFromString<HashRequestV1>(argumentsJson)
+                        val input = request.value.encodeToByteArray()
+                        require(input.size <= MAX_HASH_INPUT_BYTES) { "Hash input is too large" }
+                        val bytes = input.toByteString()
+                        val digest = if (operation == "crypto.md5") bytes.md5() else bytes.sha256()
+                        JsonPrimitive(digest.hex())
+                    }
+
+                    "locale.current" -> {
+                        requireEmptyArguments(argumentsJson)
+                        JsonPrimitive(context.metadata.locale)
+                    }
+
+                    else -> {
+                        throw PluginHostException("host.unsupported", "Unknown Host operation")
+                    }
+                }
+            if (apiVersion >= 2) context.accountHttp?.ensureActive()
+            success(value)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: PluginHostException) {
+            failure(error.code, error.message ?: "Host operation failed")
+        } catch (error: IllegalArgumentException) {
+            failure("host.invalid-request", error.message ?: "Invalid Host request")
+        } catch (_: Throwable) {
+            failure("host.unavailable", "Host operation failed")
+        }
+    }
+}
+
+@Serializable
+private data class CredentialReplaceRequestV1(
+    val value: JsonElement,
+    val expectedRevision: String? = null,
+)
+
+@Serializable
+private data class CredentialReadRequestV2(
+    val withRevision: Boolean = false,
+)
+
+@Serializable
+private data class RandomRequestV1(
+    val size: Int,
+)
+
+@Serializable
+private data class HashRequestV1(
+    val value: String,
+)
+
+private fun requireEmptyArguments(value: String) {
+    val element = PluginJsonV1.parseToJsonElement(value)
+    require(element is JsonObject && element.isEmpty()) { "Host operation does not accept arguments" }
+}
+
+private fun requireCredentialSize(value: JsonElement) {
+    require(
+        PluginJsonV1.encodeToString(JsonElement.serializer(), value).encodeToByteArray().size <=
+            WireLimitsV1.MAX_CREDENTIAL_BYTES,
+    ) { "Credential is too large" }
+}
+
+private fun success(value: JsonElement): String =
+    buildJsonObject {
+        put("ok", true)
+        put("value", value)
+    }.toString()
+
+private fun failure(
+    code: String,
+    message: String,
+): String =
+    buildJsonObject {
+        put("ok", false)
+        put(
+            "error",
+            buildJsonObject {
+                put("code", code)
+                put("message", message.take(MAX_HOST_ERROR_LENGTH))
+            },
+        )
+    }.toString()
+
+private const val MAX_HOST_ARGUMENT_BYTES = 5 * 1_024 * 1_024
+private const val MAX_HASH_INPUT_BYTES = 1024 * 1_024
+private const val MAX_RANDOM_BYTES = 1_024
+private const val MAX_HOST_ERROR_LENGTH = 512
+
+@Serializable
+private data class StorageReadRequest(
+    val namespace: String,
+    val keys: Set<String>? = null,
+)
+
+@Serializable
+private data class StorageWriteRequest(
+    val namespace: String,
+    val changes: PluginStorageChangesV1,
+    val expectedRevision: String? = null,
+)

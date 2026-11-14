@@ -2,6 +2,10 @@ package dev.dimension.flare.data.datasource.pixiv
 
 import dev.dimension.flare.data.datasource.microblog.ActionMenu
 import dev.dimension.flare.data.datasource.microblog.PostActionFamily
+import dev.dimension.flare.data.datasource.microblog.PostEvent
+import dev.dimension.flare.data.datasource.microblog.datasource.GalleryDetail
+import dev.dimension.flare.data.datasource.microblog.datasource.GalleryOrientation
+import dev.dimension.flare.data.model.ProxyRef
 import dev.dimension.flare.data.network.pixiv.PIXIV_IMAGE_REFERER
 import dev.dimension.flare.data.network.pixiv.model.PixivComment
 import dev.dimension.flare.data.network.pixiv.model.PixivCommentStamp
@@ -23,8 +27,11 @@ import dev.dimension.flare.ui.model.UiNumber
 import dev.dimension.flare.ui.model.UiProfile
 import dev.dimension.flare.ui.model.UiTimelineV2
 import dev.dimension.flare.ui.model.UiTranslatableText
+import dev.dimension.flare.ui.model.asType
+import dev.dimension.flare.ui.model.bindMediaProxy
 import dev.dimension.flare.ui.model.mapper.pixivFavourite
 import dev.dimension.flare.ui.model.toUiImage
+import dev.dimension.flare.ui.model.withProxy
 import dev.dimension.flare.ui.render.parseHtml
 import dev.dimension.flare.ui.render.toUi
 import dev.dimension.flare.ui.render.toUiPlainText
@@ -32,6 +39,7 @@ import dev.dimension.flare.ui.route.DeeplinkRoute
 import dev.dimension.flare.ui.route.toUri
 import kotlinx.collections.immutable.persistentListOf
 import kotlinx.collections.immutable.persistentMapOf
+import kotlinx.collections.immutable.toImmutableList
 import kotlinx.collections.immutable.toPersistentList
 import kotlinx.collections.immutable.toPersistentMap
 import kotlin.time.Clock
@@ -107,7 +115,7 @@ internal fun PixivIllust.toUiTimeline(accountKey: MicroBlogKey): UiTimelineV2.Po
             ),
         mediaClickPolicy = UiTimelineV2.Post.MediaClickPolicy.OpenPostClickEvent,
         accountType = AccountType.Specific(accountKey),
-    )
+    ).bindMediaProxy()
 }
 
 internal fun PixivComment.toUiTimeline(
@@ -140,7 +148,7 @@ internal fun PixivComment.toUiTimeline(
             ),
         mediaClickPolicy = UiTimelineV2.Post.MediaClickPolicy.OpenPostClickEvent,
         accountType = AccountType.Specific(accountKey),
-    )
+    ).bindMediaProxy()
 
 private fun PixivCommentStamp.toUiMedia(): UiMedia.Image? = stampUrl.toUiImage(persistentMapOf("Referer" to PIXIV_IMAGE_REFERER))
 
@@ -153,7 +161,7 @@ internal fun PixivUser.toUiProfile(accountKey: MicroBlogKey? = null): UiProfile 
                 .toUiImage(persistentMapOf("Referer" to PIXIV_IMAGE_REFERER)),
         nameInternal = name.toUiPlainText(),
         platformId = PIXIV_PLATFORM_ID,
-        platformIcon = dev.dimension.flare.ui.model.UiIcon.Pixiv,
+        platformIcon = UiIcon.Pixiv.asType(),
         clickEvent =
             ClickEvent.Deeplink(
                 DeeplinkRoute.Profile.User(
@@ -176,7 +184,7 @@ internal fun PixivUser.toUiProfile(accountKey: MicroBlogKey? = null): UiProfile 
                 persistentListOf()
             },
         bottomContent = null,
-    )
+    ).withProxy(ProxyRef.forAccount(accountKey))
 
 internal fun PixivCredential.toUiProfile(accountKey: MicroBlogKey? = null): UiProfile =
     UiProfile(
@@ -185,7 +193,7 @@ internal fun PixivCredential.toUiProfile(accountKey: MicroBlogKey? = null): UiPr
         avatar = profileImageUrl.toUiImage(persistentMapOf("Referer" to PIXIV_IMAGE_REFERER)),
         nameInternal = (userName ?: userAccount ?: userId.toString()).toUiPlainText(),
         platformId = PIXIV_PLATFORM_ID,
-        platformIcon = dev.dimension.flare.ui.model.UiIcon.Pixiv,
+        platformIcon = UiIcon.Pixiv.asType(),
         clickEvent =
             ClickEvent.Deeplink(
                 DeeplinkRoute.Profile.User(
@@ -208,7 +216,7 @@ internal fun PixivCredential.toUiProfile(accountKey: MicroBlogKey? = null): UiPr
                 persistentListOf()
             },
         bottomContent = null,
-    )
+    ).withProxy(ProxyRef.forAccount(accountKey))
 
 internal fun PixivUserDetailResponse.toUiProfile(accountKey: MicroBlogKey? = null): UiProfile {
     val base = user.toUiProfile(accountKey)
@@ -343,3 +351,57 @@ private fun parsePixivDate(value: String): Instant =
     }.getOrElse {
         Clock.System.now()
     }
+
+internal fun UiTimelineV2.Post.toGalleryDetail(accountKey: MicroBlogKey): GalleryDetail {
+    val actionItems = actions.filterIsInstance<ActionMenu.Item>()
+    val favouriteAction =
+        actionItems.firstOrNull { action ->
+            val text = action.text as? ActionMenu.Item.Text.Localized
+            text?.type == ActionMenu.Item.Text.Localized.Type.Favorite ||
+                text?.type == ActionMenu.Item.Text.Localized.Type.UnFavorite
+        }
+    val favouriteText = favouriteAction?.text as? ActionMenu.Item.Text.Localized
+    val favourited = favouriteText?.type == ActionMenu.Item.Text.Localized.Type.UnFavorite
+    val favouriteCount = favouriteAction?.count?.value ?: 0L
+    return GalleryDetail(
+        orientation = GalleryOrientation.Vertical,
+        statusKey = statusKey,
+        accountType = accountType,
+        url = "https://www.pixiv.net/artworks/${statusKey.id}",
+        images = images,
+        title =
+            contentWarning
+                ?.original
+                ?.raw
+                .orEmpty(),
+        author = user,
+        createdAt = createdAt,
+        content = content.original.takeUnless { content -> content.isEmpty },
+        isBookmarked = favourited,
+        bookmarkAction =
+            ClickEvent.event(
+                accountKey = accountKey,
+                postEvent =
+                    PostEvent.Pixiv.Bookmark(
+                        postKey = statusKey,
+                        bookmarked = favourited,
+                        count = favouriteCount,
+                        accountKey = accountKey,
+                    ),
+            ),
+        translation =
+            GalleryDetail.Translation(
+                title = contentWarning?.translation?.raw,
+                content = content.translation,
+                state = translationDisplayState,
+            ),
+        matrix =
+            actionItems
+                .mapNotNull { action ->
+                    GalleryDetail.Matrix(
+                        icon = action.icon ?: return@mapNotNull null,
+                        count = action.count?.value ?: return@mapNotNull null,
+                    )
+                }.toImmutableList(),
+    )
+}

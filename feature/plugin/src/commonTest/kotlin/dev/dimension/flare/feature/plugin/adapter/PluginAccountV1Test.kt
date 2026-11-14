@@ -1,0 +1,877 @@
+package dev.dimension.flare.feature.plugin.adapter
+
+import dev.dimension.flare.data.repository.RequireReLoginException
+import dev.dimension.flare.feature.plugin.abi.PluginAbiV1
+import dev.dimension.flare.feature.plugin.abi.PluginJsonV1
+import dev.dimension.flare.feature.plugin.lifecycle.InstalledPluginV1
+import dev.dimension.flare.feature.plugin.lifecycle.RunningPluginV1
+import dev.dimension.flare.feature.plugin.login.requireLoginSuccess
+import dev.dimension.flare.feature.plugin.manifest.CapabilityManifestV1
+import dev.dimension.flare.feature.plugin.manifest.CapabilityOperationManifestV1
+import dev.dimension.flare.feature.plugin.manifest.PluginManifestV1
+import dev.dimension.flare.feature.plugin.manifest.PluginPlatformManifestV1
+import dev.dimension.flare.feature.plugin.manifest.PluginTextV1
+import dev.dimension.flare.feature.plugin.manifest.socialPlatform
+import dev.dimension.flare.feature.plugin.wire.AccountPluginSnapshotV1
+import dev.dimension.flare.feature.plugin.wire.ComposeConfigV2
+import dev.dimension.flare.feature.plugin.wire.LoginSuccessV1
+import dev.dimension.flare.feature.plugin.wire.PluginAccountCredentialV1
+import dev.dimension.flare.feature.plugin.wire.VisibilityV1
+import dev.dimension.flare.model.MicroBlogKey
+import dev.dimension.flare.model.PlatformDataSourceContext
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.test.runTest
+import kotlinx.serialization.KSerializer
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.decodeFromJsonElement
+import kotlinx.serialization.json.encodeToJsonElement
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
+import kotlin.test.assertNotEquals
+import kotlin.test.assertTrue
+
+class PluginAccountV1Test {
+    @Test
+    fun conditionalUpdatesAreAtomicAndUnconditionalUpdatesAdvanceTheRevision() =
+        runTest {
+            val plugin = plugin(setOf("detail"), apiVersion = 2)
+            val initial = credential(plugin, setOf("detail"), setOf("detail")).copy(sessionEpoch = "epoch", credentialRevision = "revision")
+            val context = AtomicContext(initial)
+            val access = PlatformDataSourceCredentialAccessV1(plugin, context)
+            val before = access.readVersioned()
+            val results =
+                listOf("first", "second")
+                    .map { token ->
+                        async { access.replaceIfCurrent(JsonPrimitive(token), before.revision) }
+                    }.awaitAll()
+            assertEquals(1, results.count { it })
+            val after = access.readVersioned()
+            assertNotEquals(before.revision, after.revision)
+            assertFalse(access.replaceIfCurrent(JsonPrimitive("stale"), before.revision))
+            assertEquals(after, access.readVersioned())
+            access.replace(JsonPrimitive("latest"))
+            assertEquals(JsonPrimitive("latest"), access.read())
+            assertNotEquals(after.revision, access.readVersioned().revision)
+            assertEquals("epoch", context.persisted.value.sessionEpoch)
+        }
+
+    @Test
+    fun oldAccessCannotReadOrWriteAfterReloginOrDeleteAndReadd() =
+        runTest {
+            val plugin = plugin(setOf("detail"), apiVersion = 2)
+            val initial =
+                credential(
+                    plugin,
+                    setOf("detail"),
+                    setOf("detail"),
+                ).copy(sessionEpoch = "old", credentialRevision = "old-revision")
+            val context = AtomicContext(initial)
+            val old = PlatformDataSourceCredentialAccessV1(plugin, context)
+            context.removed = true
+            assertFailsWith<CancellationException> { old.replace(JsonPrimitive("late")) }
+            context.removed = false
+            val replacement =
+                initial.copy(
+                    sessionEpoch = "new",
+                    credentialRevision = "new-revision",
+                    credential = JsonPrimitive("new-login"),
+                )
+            context.persisted.value = replacement
+            assertFailsWith<CancellationException> { old.read() }
+            assertFailsWith<CancellationException> { old.replace(JsonPrimitive("late")) }
+            assertFailsWith<CancellationException> { old.replaceIfCurrent(JsonPrimitive("late"), "old-revision") }
+            assertFailsWith<CancellationException> { old.ensureActive() }
+            assertEquals(replacement, context.persisted.value)
+            assertEquals(replacement.credential, PlatformDataSourceCredentialAccessV1(plugin, context).read())
+        }
+
+    @Test
+    fun legacyEnvelopeUpgradesWithoutChangingCredentialsAndNewLoginGetsFreshEpochs() =
+        runTest {
+            val plugin = plugin(setOf("detail"), apiVersion = 2)
+            val legacy = credential(plugin, setOf("detail"), setOf("detail"))
+            val raw = PluginJsonV1.encodeToString(PluginAccountCredentialV1.serializer(), legacy)
+            val prepared = plugin.prepareAccountCredential(raw)
+            assertEquals(prepared, plugin.prepareAccountCredential(prepared))
+            val upgraded = PluginJsonV1.decodeFromString<PluginAccountCredentialV1>(prepared)
+            assertEquals(legacy.snapshot, upgraded.snapshot)
+            assertEquals(legacy.credential, upgraded.credential)
+            val context = AtomicContext(upgraded)
+            val access = PlatformDataSourceCredentialAccessV1(plugin, context)
+            assertEquals(upgraded, access.initial())
+            assertEquals(legacy.credential, access.readVersioned().value)
+            val revision = access.readVersioned().revision
+            assertTrue(access.replaceIfCurrent(JsonPrimitive("refreshed"), revision))
+            assertFalse(access.replaceIfCurrent(JsonPrimitive("stale"), revision))
+            assertEquals(JsonPrimitive("refreshed"), access.read())
+            val success =
+                LoginSuccessV1(
+                    legacy.snapshot.accountId,
+                    legacy.snapshot.origin,
+                    legacy.credential,
+                    legacy.snapshot.profile,
+                    legacy.snapshot.negotiatedCapabilities,
+                )
+            val first = plugin.accountCredential(success)
+            val second = plugin.accountCredential(success)
+            assertTrue(first.sessionEpoch != null && first.credentialRevision != null)
+            assertNotEquals(first.sessionEpoch, second.sessionEpoch)
+            assertNotEquals(first.credentialRevision, second.credentialRevision)
+        }
+
+    @Test
+    fun preparationDoesNotGuessCredentialSchemasOrRepairPartialSessions() {
+        val plugin = plugin(setOf("detail"), apiVersion = 2)
+        val old = credential(plugin, setOf("detail"), setOf("detail"))
+        val raw = PluginJsonV1.encodeToString(PluginAccountCredentialV1.serializer(), old)
+        assertEquals(raw, plugin(setOf("detail"), apiVersion = 1).prepareAccountCredential(raw))
+        assertEquals(raw, plugin(setOf("detail"), apiVersion = 2, credentialSchemaVersion = 2).prepareAccountCredential(raw))
+        assertFailsWith<IllegalArgumentException> {
+            plugin.prepareAccountCredential(
+                PluginJsonV1.encodeToString(PluginAccountCredentialV1.serializer(), old.copy(sessionEpoch = "partial")),
+            )
+        }
+        assertFailsWith<IllegalArgumentException> {
+            plugin.prepareAccountCredential(
+                PluginJsonV1.encodeToString(
+                    PluginAccountCredentialV1.serializer(),
+                    old.copy(snapshot = old.snapshot.copy(pluginId = "other")),
+                ),
+            )
+        }
+    }
+
+    @Test
+    fun composeVersionUpgradePreservesNegotiatedPublishAndDeniedPublish() {
+        val legacy = PluginAbiV1.Capabilities.COMPOSE_V1
+        val original = plugin(setOf("publish"), capability = legacy)
+        val account = credential(original, setOf("publish"), setOf("publish"), capability = legacy)
+        val upgraded =
+            plugin(setOf("publish"), capability = PluginAbiV1.Capabilities.COMPOSE).let {
+                it.copy(
+                    installed =
+                        it.installed.copy(
+                            manifest =
+                                it.installed.manifest.copy(
+                                    platform =
+                                        it.installed.manifest.socialPlatform
+                                            .copy(composeDefaults = composeConfig()),
+                                ),
+                        ),
+                )
+            }
+        assertEquals(setOf("publish"), account.effectiveCapabilities(upgraded)[PluginAbiV1.Capabilities.COMPOSE])
+        assertFalse(
+            PluginAbiV1.Capabilities.COMPOSE in
+                account.copy(snapshot = account.snapshot.copy(negotiatedCapabilities = emptyMap())).effectiveCapabilities(upgraded),
+        )
+    }
+
+    @Test
+    fun readonlyLegacyComposeConfigSurvivesAccountSavingAndApiUpgrade() {
+        val original = plugin(setOf("detail"))
+        val previous = credential(original, setOf("detail"), setOf("detail"))
+        val success =
+            LoginSuccessV1(
+                previous.snapshot.accountId,
+                previous.snapshot.origin,
+                previous.credential,
+                previous.snapshot.profile,
+                previous.snapshot.negotiatedCapabilities,
+                composeConfig = ComposeConfigV2(text = ComposeConfigV2.TextConfigV1(500)),
+            )
+        val saved = original.accountCredential(success)
+        assertEquals(null, saved.composeConfig(original))
+        val upgraded = plugin(setOf("detail"), apiVersion = 2)
+        val raw = PluginJsonV1.encodeToString(PluginAccountCredentialV1.serializer(), saved)
+        val prepared = PluginJsonV1.decodeFromString<PluginAccountCredentialV1>(upgraded.prepareAccountCredential(raw))
+        assertEquals(saved.credential, prepared.credential)
+        assertEquals(setOf(PluginAbiV1.Capabilities.POST), prepared.effectiveCapabilities(upgraded).keys)
+        assertEquals(null, prepared.composeConfig(upgraded))
+        val addedComposer =
+            upgraded.copy(
+                installed =
+                    upgraded.installed.copy(
+                        manifest =
+                            upgraded.installed.manifest.copy(
+                                platform =
+                                    upgraded.installed.manifest.socialPlatform.copy(
+                                        capabilities =
+                                            upgraded.installed.manifest.socialPlatform.capabilities +
+                                                (
+                                                    PluginAbiV1.Capabilities.COMPOSE to
+                                                        CapabilityManifestV1(mapOf("publish" to CapabilityOperationManifestV1()))
+                                                ),
+                                        composeDefaults = composeConfig(),
+                                    ),
+                            ),
+                    ),
+            )
+        val addedAccount = PluginJsonV1.decodeFromString<PluginAccountCredentialV1>(addedComposer.prepareAccountCredential(raw))
+        assertEquals(saved.credential, addedAccount.credential)
+        assertEquals(composeConfig(), addedAccount.composeConfig(addedComposer))
+        assertEquals(setOf("publish"), addedAccount.effectiveCapabilities(addedComposer)[PluginAbiV1.Capabilities.COMPOSE])
+    }
+
+    @Test
+    fun removingLegacyComposeModesDoesNotInvalidateTheAccount() {
+        val original = plugin(setOf("publish"), capability = PluginAbiV1.Capabilities.COMPOSE_V1)
+        val account =
+            credential(original, setOf("publish"), setOf("publish"), capability = PluginAbiV1.Capabilities.COMPOSE_V1).let {
+                it.copy(snapshot = it.snapshot.copy(composeConfig = ComposeConfigV2(text = ComposeConfigV2.TextConfigV1(500))))
+            }
+        val upgraded =
+            plugin(setOf("publish"), apiVersion = 2, capability = PluginAbiV1.Capabilities.COMPOSE).let {
+                it.copy(
+                    installed =
+                        it.installed.copy(
+                            manifest =
+                                it.installed.manifest.copy(
+                                    platform =
+                                        it.installed.manifest.socialPlatform.copy(
+                                            composeDefaults =
+                                                composeConfig().copy(
+                                                    supportedTypes = setOf(dev.dimension.flare.data.datasource.microblog.ComposeType.Quote),
+                                                ),
+                                        ),
+                                ),
+                        ),
+                )
+            }
+        val prepared =
+            PluginJsonV1.decodeFromString<PluginAccountCredentialV1>(
+                upgraded.prepareAccountCredential(PluginJsonV1.encodeToString(PluginAccountCredentialV1.serializer(), account)),
+            )
+        assertEquals(account.credential, prepared.credential)
+        assertTrue(prepared.composeConfig(upgraded)!!.supportedTypes.isEmpty())
+    }
+
+    @Test
+    fun legacyComposeKeepsAbsentOverridesAndUsesTheNegotiatedProtocol() {
+        val legacy = PluginAbiV1.Capabilities.COMPOSE_V1
+        val original =
+            plugin(setOf("publish"), capability = legacy).let {
+                it.copy(
+                    installed =
+                        it.installed.copy(
+                            manifest =
+                                it.installed.manifest.copy(
+                                    platform =
+                                        it.installed.manifest.socialPlatform.copy(
+                                            composeDefaults = composeConfig().copy(contentWarning = true, supportedTypes = emptySet()),
+                                        ),
+                                ),
+                        ),
+                )
+            }
+        val account = credential(original, setOf("publish"), setOf("publish"), capability = legacy)
+        assertTrue(account.composeConfig(original)!!.contentWarning)
+        val dual =
+            original.copy(
+                installed =
+                    original.installed.copy(
+                        manifest =
+                            original.installed.manifest.copy(
+                                platform =
+                                    original.installed.manifest.socialPlatform.copy(
+                                        capabilities =
+                                            original.installed.manifest.socialPlatform.capabilities +
+                                                (
+                                                    PluginAbiV1.Capabilities.COMPOSE to
+                                                        CapabilityManifestV1(mapOf("publish" to CapabilityOperationManifestV1()))
+                                                ),
+                                        composeDefaults = composeConfig().copy(contentWarning = true),
+                                    ),
+                            ),
+                    ),
+            )
+        val dualAccount =
+            account
+                .copy(
+                    snapshot =
+                        account.snapshot.copy(
+                            manifestCapabilities =
+                                dual.installed.manifest.socialPlatform.capabilities.mapValues {
+                                    it.value.operations.keys
+                                },
+                        ),
+                )
+        assertEquals(dev.dimension.flare.feature.plugin.wire.legacyComposeTypes, dualAccount.composeConfig(dual)!!.supportedTypes)
+        assertTrue(dualAccount.composeConfig(dual)!!.contentWarning)
+        val oldOverride = dualAccount.copy(snapshot = dualAccount.snapshot.copy(composeConfig = ComposeConfigV2(contentWarning = true)))
+        oldOverride.requireValid(dual)
+        assertTrue(oldOverride.composeConfig(dual)!!.contentWarning)
+    }
+
+    @Test
+    fun v2PackageSnapshotOnlyAdvancesAfterCacheInvalidationSucceeds() =
+        runTest {
+            val plugin = plugin(setOf("detail"), apiVersion = 2)
+            val initial =
+                credential(plugin, setOf("detail"), setOf("detail")).let {
+                    it.copy(
+                        snapshot = it.snapshot.copy(packageHash = "b".repeat(64)),
+                        sessionEpoch = "epoch",
+                        credentialRevision = "revision",
+                    )
+                }
+            val context = AtomicContext(initial).apply { invalidationFailure = IllegalStateException("cache unavailable") }
+            val access = PlatformDataSourceCredentialAccessV1(plugin, context)
+            assertFailsWith<IllegalStateException> { access.current() }
+            assertEquals(initial, context.persisted.value)
+            context.invalidationFailure = null
+            access.current()
+            assertEquals(2, context.invalidations)
+            assertEquals(plugin.installed.packageHash, context.persisted.value.snapshot.packageHash)
+            assertEquals(initial.credentialRevision, context.persisted.value.credentialRevision)
+        }
+
+    @Test
+    fun unknownCapabilitiesAreIgnoredThroughLoginPersistenceAndRestoration() {
+        val base = plugin(setOf("detail", "future"))
+        val manifest = base.installed.manifest
+        val plugin =
+            base.copy(
+                installed =
+                    base.installed.copy(
+                        manifest =
+                            manifest.copy(
+                                platform =
+                                    manifest.socialPlatform.copy(
+                                        capabilities =
+                                            manifest.socialPlatform.capabilities +
+                                                (
+                                                    "flare.datasource.novel/v1" to
+                                                        CapabilityManifestV1(mapOf("read" to CapabilityOperationManifestV1()))
+                                                ),
+                                    ),
+                            ),
+                    ),
+            )
+        val previous = credential(plugin, previous = setOf("detail", "future"), negotiated = setOf("detail", "future"))
+        val future = mapOf("flare.datasource.novel/v1" to setOf("read"))
+        val success =
+            LoginSuccessV1(
+                accountId = previous.snapshot.accountId,
+                origin = previous.snapshot.origin,
+                profile = previous.snapshot.profile,
+                credential = JsonObject(mapOf("futureCredential" to JsonPrimitive("preserved"))),
+                capabilities = previous.snapshot.negotiatedCapabilities + future,
+            )
+        val expected = mapOf(PluginAbiV1.Capabilities.POST to setOf("detail"))
+        assertEquals(expected, plugin.requireLoginSuccess(success, previous.snapshot.origin, null).capabilities)
+        val created = plugin.accountCredential(success)
+        assertEquals(expected, created.snapshot.manifestCapabilities)
+        assertEquals(expected, created.snapshot.negotiatedCapabilities)
+        assertEquals(success.credential, created.credential)
+
+        val persisted =
+            previous.copy(
+                snapshot =
+                    previous.snapshot.copy(
+                        manifestCapabilities = previous.snapshot.manifestCapabilities + future,
+                        negotiatedCapabilities = previous.snapshot.negotiatedCapabilities + future,
+                    ),
+            )
+        persisted.requireValid(plugin)
+        val restored = PluginJsonV1.decodeFromJsonElement<PluginAccountCredentialV1>(PluginJsonV1.encodeToJsonElement(persisted))
+        restored.requireValid(plugin)
+        assertEquals(expected, restored.snapshot.manifestCapabilities)
+        assertEquals(expected, restored.snapshot.negotiatedCapabilities)
+        assertEquals(expected, restored.effectiveCapabilities(plugin))
+        val session = PluginSessionCapabilitiesV1(manifest.socialPlatform.capabilities, success.capabilities, authenticated = true)
+        assertEquals(false, session.hasOperation(PluginAbiV1.Capabilities.POST, "future"))
+        assertEquals(false, session.canExpose("flare.datasource.novel/v1"))
+    }
+
+    @Test
+    fun knownUndeclaredAndIncompleteLoginCapabilitiesRemainInvalid() {
+        val plugin = plugin(setOf("detail"))
+        val account = credential(plugin, previous = setOf("detail"), negotiated = setOf("detail"))
+        listOf(setOf("detail", "mutate"), emptySet()).forEach { operations ->
+            val success =
+                LoginSuccessV1(
+                    accountId = account.snapshot.accountId,
+                    origin = account.snapshot.origin,
+                    profile = account.snapshot.profile,
+                    credential = account.credential,
+                    capabilities = mapOf(PluginAbiV1.Capabilities.POST to operations),
+                )
+            assertFailsWith<IllegalArgumentException> { plugin.requireLoginSuccess(success, account.snapshot.origin, null) }
+        }
+    }
+
+    @Test
+    fun searchLoginCanNegotiateASubsetWhileExistingAccountsAdoptNewOperations() {
+        val search = PluginAbiV1.Capabilities.SEARCH
+        val plugin = plugin(setOf("posts", "profiles"), capability = search)
+        val account = credential(plugin, previous = setOf("posts"), negotiated = setOf("posts"), capability = search)
+        val success =
+            LoginSuccessV1(
+                accountId = account.snapshot.accountId,
+                origin = account.snapshot.origin,
+                profile = account.snapshot.profile,
+                credential = account.credential,
+                capabilities = mapOf(search to setOf("posts")),
+            )
+
+        assertEquals(success, plugin.requireLoginSuccess(success, account.snapshot.origin, null))
+        assertEquals(setOf("posts"), plugin.accountCredential(success).effectiveCapabilities(plugin).getValue(search))
+        assertEquals(setOf("posts", "profiles"), account.effectiveCapabilities(plugin).getValue(search))
+        assertFailsWith<IllegalArgumentException> {
+            plugin.requireLoginSuccess(
+                success.copy(capabilities = mapOf(search to setOf("posts", "discoverPosts"))),
+                account.snapshot.origin,
+                null,
+            )
+        }
+    }
+
+    @Test
+    fun accountHttpRequiresExplicitNegotiationWhenAddedByAnUpdate() {
+        val original = plugin(setOf("detail"), apiVersion = 2)
+        val account = credential(original, previous = setOf("detail"), negotiated = setOf("detail"))
+        val manifest = original.installed.manifest
+        val capability = PluginAbiV1.Capabilities.ACCOUNT_HTTP
+        val updatedPlatform =
+            manifest.socialPlatform.copy(
+                capabilities =
+                    manifest.socialPlatform.capabilities + (
+                        capability to
+                            CapabilityManifestV1(
+                                operations = mapOf("authenticate" to CapabilityOperationManifestV1()),
+                                authOrigins = setOf(PluginAbiV1.ACCOUNT_ORIGIN),
+                            )
+                    ),
+            )
+        val updated = original.copy(installed = original.installed.copy(manifest = manifest.copy(platform = updatedPlatform)))
+        assertFalse(capability in account.effectiveCapabilities(updated))
+        val previouslyDeclined =
+            account.copy(
+                snapshot =
+                    account.snapshot.copy(
+                        manifestCapabilities = account.snapshot.manifestCapabilities + (capability to setOf("authenticate")),
+                    ),
+            )
+        assertFalse(capability in previouslyDeclined.effectiveCapabilities(updated))
+        val success =
+            LoginSuccessV1(
+                accountId = account.snapshot.accountId,
+                origin = account.snapshot.origin,
+                credential = account.credential,
+                profile = account.snapshot.profile,
+                capabilities = account.snapshot.negotiatedCapabilities + (capability to setOf("authenticate")),
+            )
+        assertEquals(setOf("authenticate"), updated.accountCredential(success).effectiveCapabilities(updated)[capability])
+    }
+
+    @Test
+    fun newManifestOperationIsAvailableWithoutRequiringRelogin() {
+        val plugin = plugin(setOf("detail", "context"))
+        val account = credential(plugin, previous = setOf("detail"), negotiated = setOf("detail"))
+
+        assertEquals(
+            setOf("detail", "context"),
+            account.effectiveCapabilities(plugin).getValue(PluginAbiV1.Capabilities.POST),
+        )
+    }
+
+    @Test
+    fun operationRejectedAtLoginStaysUnavailable() {
+        val plugin = plugin(setOf("detail", "context"))
+        val account = credential(plugin, previous = setOf("detail", "context"), negotiated = setOf("detail"))
+
+        assertEquals(
+            setOf("detail"),
+            account.effectiveCapabilities(plugin).getValue(PluginAbiV1.Capabilities.POST),
+        )
+    }
+
+    @Test
+    fun credentialSchemaChangeKeepsCapabilitiesButRejectsAccessUntilRestoreOrRelogin() =
+        runTest {
+            val original = plugin(setOf("detail"))
+            val account = credential(original, previous = setOf("detail"), negotiated = setOf("detail"))
+            val changed =
+                plugin(setOf("detail"), credentialSchemaVersion = 2).let {
+                    it.copy(installed = it.installed.copy(packageHash = "b".repeat(64)))
+                }
+            val persisted = MutableStateFlow(account)
+            var writes = 0
+            var invalidations = 0
+            val context =
+                object : PlatformDataSourceContext {
+                    override val accountKey: MicroBlogKey = MicroBlogKey("me", "example.social")
+
+                    @Suppress("UNCHECKED_CAST")
+                    override fun <T : Any> credential(serializer: KSerializer<T>): T = account as T
+
+                    @Suppress("UNCHECKED_CAST")
+                    override fun <T : Any> credentialFlow(serializer: KSerializer<T>): Flow<T> = persisted as Flow<T>
+
+                    override suspend fun <T : Any> mutateCredential(
+                        serializer: KSerializer<T>,
+                        update: (T) -> T?,
+                    ): T? =
+                        update(credentialFlow(serializer).first())?.also {
+                            if (it != credentialFlow(serializer).first()) updateCredential(serializer, it)
+                        }
+
+                    override suspend fun <T : Any> updateCredential(
+                        serializer: KSerializer<T>,
+                        credential: T,
+                    ) {
+                        writes += 1
+                        persisted.value = credential as PluginAccountCredentialV1
+                    }
+
+                    override suspend fun invalidateCachedContent() {
+                        invalidations += 1
+                    }
+                }
+            val access = PlatformDataSourceCredentialAccessV1(changed, context)
+
+            assertEquals(
+                setOf("detail"),
+                access.initial().effectiveCapabilities(changed).getValue(PluginAbiV1.Capabilities.POST),
+            )
+            assertFailsWith<RequireReLoginException> { access.current() }
+            assertFailsWith<RequireReLoginException> { access.read() }
+            assertFailsWith<RequireReLoginException> { access.replace(JsonObject(emptyMap())) }
+            assertEquals(0, writes)
+            assertEquals(0, invalidations)
+            assertEquals(account, persisted.value)
+
+            assertEquals(account.credential, PlatformDataSourceCredentialAccessV1(original, context).read())
+            val refreshed = JsonObject(mapOf("token" to JsonPrimitive("new-schema")))
+            persisted.value =
+                credential(changed, previous = setOf("detail"), negotiated = setOf("detail"))
+                    .copy(credential = refreshed)
+            assertEquals(refreshed, access.read())
+            val rotated = JsonObject(mapOf("token" to JsonPrimitive("rotated")))
+            access.replace(rotated)
+            assertEquals(rotated, persisted.value.credential)
+            assertEquals(1, writes)
+            assertEquals(0, invalidations)
+        }
+
+    @Test
+    fun hostCredentialAccessReadsTheLatestPersistedEnvelope() =
+        runTest {
+            val plugin = plugin(setOf("detail"))
+            val initial =
+                credential(plugin, previous = setOf("detail"), negotiated = setOf("detail"))
+                    .copy(credential = JsonObject(mapOf("token" to JsonPrimitive("old"))))
+            val persisted = MutableStateFlow(initial)
+            val context =
+                object : PlatformDataSourceContext {
+                    override val accountKey: MicroBlogKey = MicroBlogKey("me", "example.social")
+
+                    @Suppress("UNCHECKED_CAST")
+                    override fun <T : Any> credential(serializer: KSerializer<T>): T = initial as T
+
+                    @Suppress("UNCHECKED_CAST")
+                    override fun <T : Any> credentialFlow(serializer: KSerializer<T>): Flow<T> = persisted as Flow<T>
+
+                    @Suppress("UNCHECKED_CAST")
+                    override suspend fun <T : Any> mutateCredential(
+                        serializer: KSerializer<T>,
+                        update: (T) -> T?,
+                    ): T? =
+                        update(credentialFlow(serializer).first())?.also {
+                            if (it != credentialFlow(serializer).first()) updateCredential(serializer, it)
+                        }
+
+                    override suspend fun <T : Any> updateCredential(
+                        serializer: KSerializer<T>,
+                        credential: T,
+                    ) {
+                        persisted.value = credential as PluginAccountCredentialV1
+                    }
+                }
+            val access = PlatformDataSourceCredentialAccessV1(plugin, context)
+            val refreshed = JsonObject(mapOf("token" to JsonPrimitive("new")))
+
+            persisted.value = initial.copy(credential = refreshed)
+
+            assertEquals(initial.credential, access.initial().credential)
+            assertEquals(refreshed, access.read())
+
+            val rotated = JsonObject(mapOf("token" to JsonPrimitive("rotated")))
+            access.replace(rotated)
+            assertEquals(rotated, persisted.value.credential)
+        }
+
+    @Test
+    fun mismatchedPersistedAccountRequiresReloginBeforeRuntimeCreation() {
+        val plugin = plugin(setOf("detail"))
+        val initial = credential(plugin, previous = setOf("detail"), negotiated = setOf("detail"))
+        val context =
+            object : PlatformDataSourceContext {
+                override val accountKey: MicroBlogKey = MicroBlogKey("another-account", "example.social")
+
+                @Suppress("UNCHECKED_CAST")
+                override fun <T : Any> credential(serializer: KSerializer<T>): T = initial as T
+
+                @Suppress("UNCHECKED_CAST")
+                override fun <T : Any> credentialFlow(serializer: KSerializer<T>): Flow<T> = MutableStateFlow(initial) as Flow<T>
+
+                override suspend fun <T : Any> updateCredential(
+                    serializer: KSerializer<T>,
+                    credential: T,
+                ) = Unit
+            }
+
+        assertFailsWith<RequireReLoginException> {
+            PlatformDataSourceCredentialAccessV1(plugin, context).initial()
+        }
+    }
+
+    @Test
+    fun packageChangeInvalidatesContentAndAdvancesThePersistedSnapshotOnce() =
+        runTest {
+            val plugin = plugin(setOf("detail"))
+            val previous =
+                credential(plugin, previous = setOf("detail"), negotiated = setOf("detail"))
+                    .let { it.copy(snapshot = it.snapshot.copy(packageHash = "b".repeat(64))) }
+            val persisted = MutableStateFlow(previous)
+            var invalidations = 0
+            val context =
+                object : PlatformDataSourceContext {
+                    override val accountKey: MicroBlogKey = MicroBlogKey("me", "example.social")
+
+                    @Suppress("UNCHECKED_CAST")
+                    override fun <T : Any> credential(serializer: KSerializer<T>): T = previous as T
+
+                    @Suppress("UNCHECKED_CAST")
+                    override fun <T : Any> credentialFlow(serializer: KSerializer<T>): Flow<T> = persisted as Flow<T>
+
+                    @Suppress("UNCHECKED_CAST")
+                    override suspend fun <T : Any> mutateCredential(
+                        serializer: KSerializer<T>,
+                        update: (T) -> T?,
+                    ): T? = update(credentialFlow(serializer).first())?.also { updateCredential(serializer, it) }
+
+                    override suspend fun <T : Any> updateCredential(
+                        serializer: KSerializer<T>,
+                        credential: T,
+                    ) {
+                        persisted.value = credential as PluginAccountCredentialV1
+                    }
+
+                    override suspend fun invalidateCachedContent() {
+                        invalidations += 1
+                    }
+                }
+            val access = PlatformDataSourceCredentialAccessV1(plugin, context)
+
+            access.read()
+            access.read()
+
+            assertEquals(1, invalidations)
+            assertEquals(plugin.installed.packageHash, persisted.value.snapshot.packageHash)
+        }
+
+    @Test
+    fun composeModesAreIntersectedAndMustOverlap() {
+        val all =
+            dev.dimension.flare.data.datasource.microblog.ComposeType.entries
+                .toSet()
+        val replyOnly = setOf(dev.dimension.flare.data.datasource.microblog.ComposeType.Reply)
+        val merged =
+            mergePluginComposeConfigV2(composeConfig().copy(supportedTypes = all), composeConfig().copy(supportedTypes = replyOnly))
+        assertEquals(replyOnly, merged?.supportedTypes)
+        assertFailsWith<IllegalArgumentException> {
+            mergePluginComposeConfigV2(
+                composeConfig().copy(supportedTypes = replyOnly),
+                composeConfig().copy(supportedTypes = setOf(dev.dimension.flare.data.datasource.microblog.ComposeType.New)),
+            )
+        }
+    }
+
+    @Test
+    fun composeConstraintsUseStrictIntersection() {
+        val merged =
+            mergePluginComposeConfigV2(
+                composeConfig(
+                    minMedia = 1,
+                    maxMedia = 4,
+                    mimeTypes = setOf("IMAGE/*"),
+                    visibility = setOf(VisibilityV1.Public, VisibilityV1.Unlisted),
+                ),
+                composeConfig(
+                    minMedia = 2,
+                    maxMedia = 3,
+                    mimeTypes = setOf("image/jpeg", "video/mp4"),
+                    visibility = setOf(VisibilityV1.Unlisted, VisibilityV1.Followers),
+                ),
+            )
+
+        assertEquals(2, merged?.media?.minCountForNew)
+        assertEquals(3, merged?.media?.maxCount)
+        assertEquals(setOf("image/jpeg"), merged?.media?.supportedMimeTypes)
+        assertEquals(setOf(VisibilityV1.Unlisted), merged?.visibility?.allowed)
+        assertEquals(VisibilityV1.Unlisted, merged?.visibility?.default)
+    }
+
+    @Test
+    fun composeConstraintConflictsAreRejectedBeforeDatasourceCreation() {
+        assertFailsWith<IllegalArgumentException> {
+            mergePluginComposeConfigV2(
+                composeConfig(mimeTypes = setOf("image/jpeg")),
+                composeConfig(mimeTypes = setOf("video/mp4")),
+            )
+        }
+        assertFailsWith<IllegalArgumentException> {
+            mergePluginComposeConfigV2(
+                composeConfig(visibility = setOf(VisibilityV1.Public)),
+                composeConfig(visibility = setOf(VisibilityV1.Followers)),
+            )
+        }
+        assertFailsWith<IllegalArgumentException> {
+            mergePluginComposeConfigV2(
+                composeConfig(minMedia = 3, maxMedia = 4),
+                composeConfig(minMedia = 0, maxMedia = 2),
+            )
+        }
+    }
+
+    private fun credential(
+        plugin: RunningPluginV1,
+        previous: Set<String>,
+        negotiated: Set<String>,
+        capability: String = PluginAbiV1.Capabilities.POST,
+    ): PluginAccountCredentialV1 =
+        PluginAccountCredentialV1(
+            snapshot =
+                AccountPluginSnapshotV1(
+                    pluginId = plugin.installed.pluginId,
+                    platformId = plugin.installed.manifest.socialPlatform.id,
+                    packageHash = plugin.installed.packageHash,
+                    origin = "https://example.social",
+                    accountId = "me",
+                    profile =
+                        dev.dimension.flare.feature.plugin.wire.ProfileV1(
+                            dev.dimension.flare.feature.plugin.wire
+                                .EntityKeyV1("me", "example.social"),
+                            "me",
+                            "Me",
+                        ),
+                    manifestCapabilities = mapOf(capability to previous),
+                    negotiatedCapabilities = mapOf(capability to negotiated),
+                    credentialSchemaVersion = plugin.installed.manifest.socialPlatform.credentialSchemaVersion,
+                ),
+            credential = JsonObject(emptyMap()),
+        )
+
+    private fun plugin(
+        operations: Set<String>,
+        credentialSchemaVersion: Int = 1,
+        apiVersion: Int = 1,
+        capability: String = PluginAbiV1.Capabilities.POST,
+    ): RunningPluginV1 {
+        val manifest =
+            PluginManifestV1(
+                apiVersion = apiVersion,
+                id = "dev.dimension.flare.test.adapter",
+                version = "1.0.0",
+                name = PluginTextV1.Literal("Adapter"),
+                platform =
+                    PluginPlatformManifestV1(
+                        id = "Adapter",
+                        name = PluginTextV1.Literal("Adapter"),
+                        credentialSchemaVersion = credentialSchemaVersion,
+                        capabilities =
+                            mapOf(
+                                capability to
+                                    CapabilityManifestV1(
+                                        operations.associateWith { CapabilityOperationManifestV1() },
+                                    ),
+                            ),
+                    ),
+            )
+        return RunningPluginV1(
+            installed =
+                InstalledPluginV1(
+                    pluginId = manifest.id,
+                    version = manifest.version,
+                    packageHash = "a".repeat(64),
+                    packageSize = 1,
+                    iconSize = 1,
+                    manifest = manifest,
+                ),
+            packagePath = "/package.fpp",
+            iconPath = "/icon.png",
+        )
+    }
+
+    private class AtomicContext(
+        initial: PluginAccountCredentialV1,
+    ) : PlatformDataSourceContext {
+        val persisted = MutableStateFlow(initial)
+        var removed = false
+        var invalidations = 0
+        var invalidationFailure: Throwable? = null
+
+        override suspend fun invalidateCachedContent() {
+            invalidations++
+            invalidationFailure?.let { throw it }
+        }
+
+        private val mutex = Mutex()
+        override val accountKey = MicroBlogKey("me", "example.social")
+
+        @Suppress("UNCHECKED_CAST")
+        override fun <T : Any> credential(serializer: KSerializer<T>): T = persisted.value as T
+
+        @Suppress("UNCHECKED_CAST")
+        override fun <T : Any> credentialFlow(serializer: KSerializer<T>): Flow<T> = persisted as Flow<T>
+
+        override suspend fun <T : Any> updateCredential(
+            serializer: KSerializer<T>,
+            credential: T,
+        ) {
+            error("API v2 must use the atomic entry point")
+        }
+
+        @Suppress("UNCHECKED_CAST")
+        override suspend fun <T : Any> mutateCredential(
+            serializer: KSerializer<T>,
+            update: (T) -> T?,
+        ): T? =
+            mutex.withLock {
+                if (removed) throw CancellationException("Account deleted")
+                update(persisted.value as T)?.also { persisted.value = it as PluginAccountCredentialV1 }
+            }
+    }
+
+    private fun composeConfig(
+        minMedia: Int = 0,
+        maxMedia: Int = 4,
+        mimeTypes: Set<String> = emptySet(),
+        visibility: Set<VisibilityV1> = setOf(VisibilityV1.Public),
+    ): ComposeConfigV2 =
+        ComposeConfigV2(
+            supportedTypes =
+                dev.dimension.flare.data.datasource.microblog.ComposeType.entries
+                    .toSet(),
+            media =
+                ComposeConfigV2.MediaConfigV1(
+                    minCountForNew = minMedia,
+                    maxCount = maxMedia,
+                    maxBytes = 10_000_000,
+                    supportedMimeTypes = mimeTypes,
+                ),
+            visibility = ComposeConfigV2.VisibilityConfigV1(visibility, visibility.first()),
+        )
+}

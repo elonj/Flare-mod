@@ -5,11 +5,10 @@
     <string name="changelog_current"><![CDATA[
             <span>Versão %1$s:</span>
             <ul>
-                <li>Adicionada a reprodução de animações Ugoira do Pixiv e a possibilidade de as guardar como vídeos MP4.</li>
-                <li>Arraste para cima no visualizador multimédia para ver os detalhes e as ações da publicação.</li>
-                <li>O Bluesky permite agora enviar GIF e MOV. Corrigida a gravação de vídeos; a cronologia inicial oculta respostas a contas que não segue.</li>
-                <li>Melhorado o envio de conteúdos multimédia e o reenvio de rascunhos.</li>
-                <li>Correções de erros e melhorias de desempenho.</li>
+                <li>Os vídeos memorizam a velocidade de reprodução, com novas opções até 16×.</li>
+                <li>Alterne entre o texto original e o traduzido em artigos, entradas RSS e detalhes da galeria.</li>
+                <li>A pesquisa e a descoberta mostram apenas as secções suportadas pela conta selecionada.</li>
+                <li>Corrigidos alguns problemas de início de sessão na Web.</li>
             </ul>
         ]]></string>
 </resources>

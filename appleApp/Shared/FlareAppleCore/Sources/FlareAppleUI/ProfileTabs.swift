@@ -63,7 +63,11 @@ public struct ProfileTabBar: View {
                                 .foregroundStyle(Color.secondary)
                                 .overlay {
                                     Text(title)
+                                        #if os(iOS)
+                                        .flarePrimaryText()
+                                        #else
                                         .foregroundStyle(Color.primary)
+                                        #endif
                                         .opacity(tabEmphasis(at: index))
                                         .accessibilityHidden(true)
                                 }
@@ -170,7 +174,7 @@ public struct ProfileTabsLoadingPlaceholder: View {
                 HStack {
                     ForEach(placeholderTitles.indices, id: \.self) { index in
                         Text(verbatim: placeholderTitles[index])
-                            .foregroundStyle(.secondary)
+                            .flareSecondaryText()
                             .padding(.vertical, 12)
                             .overlay(alignment: .bottom) {
                                 if index == 0 {
@@ -219,4 +223,13 @@ public func profileTabTitle(for tab: ProfileState.Tab) -> String {
 
 public func profileTimelineID(for tab: ProfileState.Tab) -> String {
     tab.id
+}
+
+public func profileTimelinePresenter(for tab: ProfileState.Tab) -> TimelinePresenter {
+    switch onEnum(of: tab) {
+    case .timeline(let tab):
+        tab.presenter
+    case .media(let tab):
+        tab.presenter.getMediaTimelinePresenter()
+    }
 }

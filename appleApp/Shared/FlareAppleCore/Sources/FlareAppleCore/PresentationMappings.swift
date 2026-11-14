@@ -2,6 +2,67 @@ import Foundation
 import KotlinSharedUI
 import SwiftUI
 
+public func loginCookieSnapshot(
+    cookies: [HTTPCookie],
+    probes: [LoginCookieProbe],
+    fallbackUrl: String
+) -> LoginCookieSnapshot {
+    let fallbackURL = URL(string: fallbackUrl)
+    let rawHeader =
+        cookies
+            .filter { $0.matchesLogin(url: fallbackURL) }
+            .map { "\($0.name)=\($0.value)" }
+            .joined(separator: "; ")
+    let preferredCookies = cookies.sorted {
+        if $0.path.count != $1.path.count { return $0.path.count > $1.path.count }
+        let domains = [$0.domain, $1.domain].map { $0.trimmingCharacters(in: CharacterSet(charactersIn: ".")) }
+        if domains[0].count != domains[1].count { return domains[0].count > domains[1].count }
+        return !$0.domain.hasPrefix(".") && $1.domain.hasPrefix(".")
+    }
+    var seen = Set<[String]>()
+    let values = probes.flatMap { probe -> [LoginCookieValue] in
+        let url = URL(string: probe.url)
+        let names = Set(probe.names)
+        return preferredCookies.compactMap { cookie in
+            guard cookie.matchesLogin(url: url), names.contains(cookie.name),
+                seen.insert([probe.url, cookie.name, cookie.domain, cookie.path]).inserted else { return nil }
+            let attributes = LoginCookieAttributes(
+                domain: cookie.domain,
+                hostOnly: nil,
+                path: cookie.path,
+                expiresAt: cookie.expiresDate.map { KotlinLong(longLong: Int64($0.timeIntervalSince1970 * 1000)) },
+                session: KotlinBoolean(bool: cookie.isSessionOnly),
+                secure: KotlinBoolean(bool: cookie.isSecure),
+                httpOnly: KotlinBoolean(bool: cookie.isHTTPOnly),
+                sameSite: nil
+            )
+            return LoginCookieValue(sourceUrl: probe.url, name: cookie.name, value: cookie.value, attributes: attributes)
+        }
+    }
+    return LoginCookieSnapshot(values: values, rawHeader: rawHeader.isEmpty ? nil : rawHeader)
+}
+
+private extension HTTPCookie {
+    func matchesLogin(url: URL?) -> Bool {
+        guard let url, let host = url.host?.lowercased() else { return false }
+        if isSecure && url.scheme?.lowercased() != "https" { return false }
+
+        let rawDomain = domain.lowercased()
+        let cookieDomain = rawDomain.trimmingCharacters(in: CharacterSet(charactersIn: "."))
+        let domainMatches =
+            rawDomain.hasPrefix(".")
+                ? host == cookieDomain || host.hasSuffix(".\(cookieDomain)")
+                : host == cookieDomain
+        let requestPath = url.path.isEmpty ? "/" : url.path
+        let cookiePath = path.isEmpty ? "/" : path
+        let pathMatches =
+            requestPath == cookiePath ||
+            (requestPath.hasPrefix(cookiePath) &&
+                (cookiePath.hasSuffix("/") || requestPath.dropFirst(cookiePath.count).first == "/"))
+        return domainMatches && pathMatches
+    }
+}
+
 public func localizedPresentationString(
     _ key: String,
     fallback: String,
@@ -49,6 +110,8 @@ public extension UiText {
             localized.string.text
         case .raw(let raw):
             raw.string
+        case .externalRef(let external):
+            PluginTextResolverV1.shared.resolve(text: external)
         }
     }
 }
@@ -129,6 +192,10 @@ public extension UiStrings {
             localizedPresentationString("bluesky_login_use_password_button", fallback: "Password Login")
         case .qrConnect:
             localizedPresentationString("nostr_login_qr_button", fallback: "QR Connect")
+        case .qrLoginNewCode:
+            localizedPresentationString("plugin_login_qr_new_code", fallback: "Generate a new code")
+        case .qrLoginRetrySave:
+            localizedPresentationString("plugin_login_qr_retry_save", fallback: "Retry saving account")
         case .credentialImport:
             localizedPresentationString("nostr_login_title", fallback: "Credential Import")
         case .externalSigner:
@@ -142,15 +209,23 @@ public extension UiStrings {
         case .pixivRankingMonth:
             localizedPresentationString("pixiv_ranking_month_title", fallback: "Monthly Ranking")
         case .pixivRankingDayMale:
-            localizedPresentationString("pixiv_ranking_day_male_title", fallback: "Male Ranking")
+            localizedPresentationString("pixiv_ranking_day_male_title", fallback: "Popular with men")
         case .pixivRankingDayFemale:
-            localizedPresentationString("pixiv_ranking_day_female_title", fallback: "Female Ranking")
+            localizedPresentationString("pixiv_ranking_day_female_title", fallback: "Popular with women")
         case .pixivRankingWeekOriginal:
             localizedPresentationString("pixiv_ranking_week_original_title", fallback: "Original Ranking")
         case .pixivRankingWeekRookie:
             localizedPresentationString("pixiv_ranking_week_rookie_title", fallback: "Rookie Ranking")
         case .pixivRankingDayManga:
             localizedPresentationString("pixiv_ranking_day_manga_title", fallback: "Manga Ranking")
+        case .pixivRankingDayAi:
+            localizedPresentationString("pixiv_ranking_day_ai_title", fallback: "AI Daily Ranking")
+        case .pixivRankingDayR18:
+            localizedPresentationString("pixiv_ranking_day_r18_title", fallback: "R-18 Daily Ranking")
+        case .pixivRankingWeekR18:
+            localizedPresentationString("pixiv_ranking_week_r18_title", fallback: "R-18 Weekly Ranking")
+        case .pixivRankingDayR18Ai:
+            localizedPresentationString("pixiv_ranking_day_r18_ai_title", fallback: "R-18 AI Daily Ranking")
         case .pixivPrivateFollowing:
             localizedPresentationString("pixiv_private_following_title", fallback: "Private Following")
         case .pixivPrivateBookmarks, .pixivPrivateFavourites:
@@ -173,6 +248,10 @@ public extension UiStrings {
             localizedPresentationString("vvo_status_reposts", fallback: "Reposts")
         case .articles:
             localizedPresentationString("profile_tab_articles", fallback: "Articles")
+        case .weiboFriendsCircle:
+            localizedPresentationString("weibo_friends_circle_title", fallback: "Friends Circle")
+        case .weiboPrivateFollowing:
+            localizedPresentationString("weibo_private_following_title", fallback: "Private Following")
         case .media:
             localizedPresentationString("appearance_media_group_title", fallback: "Media")
         }

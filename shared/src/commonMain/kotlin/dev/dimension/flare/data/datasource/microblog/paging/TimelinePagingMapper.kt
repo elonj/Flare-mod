@@ -19,6 +19,7 @@ import dev.dimension.flare.model.ReferenceType
 import dev.dimension.flare.ui.model.UiProfile
 import dev.dimension.flare.ui.model.UiTimelineV2
 import dev.dimension.flare.ui.model.asTimelinePostItem
+import dev.dimension.flare.ui.model.bindMediaProxy
 import dev.dimension.flare.ui.model.withItemKey
 import kotlinx.collections.immutable.toImmutableList
 
@@ -96,6 +97,7 @@ internal object TimelinePagingMapper {
                     pagingKey = pagingKey,
                     statusId = rootStatus.data.id,
                     sortId = sortId ?: SnowflakeIdGenerator.nextId(),
+                    isGap = data is UiTimelineV2.Gap,
                     message = presentation?.message,
                     notificationKey = presentation?.notificationKey,
                     _id = timelineId,
@@ -116,7 +118,7 @@ internal object TimelinePagingMapper {
         )
     }
 
-    private fun semanticReferenceSignature(references: List<DbStatusReference>): String =
+    fun semanticReferenceSignature(references: List<DbStatusReference>): String =
         buildString {
             references
                 .sortedWith(compareBy(DbStatusReference::statusId, DbStatusReference::referenceType, DbStatusReference::referenceStatusId))
@@ -463,7 +465,7 @@ internal object TimelinePagingMapper {
 
     private fun UiTimelineV2.canonicalizeProfiles(canonicalProfiles: MutableMap<MicroBlogKey, UiProfile>): UiTimelineV2 =
         when (this) {
-            is UiTimelineV2.Feed -> {
+            is UiTimelineV2.Gap, is UiTimelineV2.Feed -> {
                 this
             }
 
@@ -565,7 +567,7 @@ internal object TimelinePagingMapper {
 
     private fun UiTimelineV2.collectProfiles(collect: (UiProfile) -> Unit) {
         when (this) {
-            is UiTimelineV2.Feed -> {}
+            is UiTimelineV2.Gap, is UiTimelineV2.Feed -> {}
 
             is UiTimelineV2.Message -> {
                 user?.let(collect)
@@ -818,6 +820,6 @@ internal object TimelinePagingMapper {
                 options = translationDisplayOptions,
                 translations = data.translations,
             )
-        return root.withItemKey(rootItemKey)
+        return root.withItemKey(rootItemKey).bindMediaProxy()
     }
 }

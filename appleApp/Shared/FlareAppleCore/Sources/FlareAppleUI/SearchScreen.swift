@@ -5,7 +5,6 @@ import FlareAppleCore
 public struct SearchScreen: View {
     @Environment(\.timelineListRenderer) private var listRenderer
     @State private var searchAccountType: AccountType
-    @Environment(\.openURL) private var openURL
     @Environment(\.timelineAppearance.aiConfig.agent) private var agentEnabled
     private let onAskAi: (String?) -> Void
     @State private var searchPresenter: KotlinPresenter<SearchState>
@@ -47,8 +46,18 @@ public struct SearchScreen: View {
 
     private var content: some View {
         scrollingContent
+        .overlay {
+            if searchPresenter.state.isSearchUnavailable || searchPresenter.state.hasNoResults {
+                ListEmptyView(
+                    searchPresenter.state.isSearchUnavailable ? "search_unavailable_title" : "search_empty_title",
+                    icon: .magnifyingGlass
+                )
+                .allowsHitTesting(false)
+            }
+        }
         .scrollContentBackground(.hidden)
         .searchListRowSpacing(2)
+        .flareTextBackground(.flareSystemBackground)
         .listStyle(.plain)
         .refreshable {
             try? await searchPresenter.state.refreshSuspend()
@@ -138,14 +147,11 @@ public struct SearchScreen: View {
                                 ForEach(0..<usersState.itemCount, id: \.self) { index in
                                     ListCardView {
                                         if let item = usersState.peek(index: index) {
-                                            UserCompatView(data: item)
+                                            SearchResultProfileView(user: item)
                                                 .onAppear {
                                                     _ = usersState.get(index: index)
                                                 }
                                                 .padding()
-                                                .onTapGesture {
-                                                    item.onClicked(ClickContext(launcher: AppleUriLauncher(openUrl: openURL)))
-                                                }
                                         } else {
                                             UserLoadingView()
                                                 .padding()
@@ -162,12 +168,19 @@ public struct SearchScreen: View {
                     .padding(.horizontal)
                     .listRowSeparator(.hidden)
                     .listRowInsets(.init(top: 0, leading: 0, bottom: 0, trailing: 0))
+                    .flareTextBackground(.flareSystemGroupedBackground)
                     .listRowBackground(Color.clear)
+                } else if case .error(let error) = onEnum(of: searchPresenter.state.users) {
+                    ListErrorView(error: error.error) { _ = error.onRetry() }
+                } else if case .loading = onEnum(of: searchPresenter.state.users) {
+                    SearchSectionProgress()
                 }
-                Section {
-                    TimelinePagingListContent(data: searchPresenter.state.status)
-                } header: {
-                    Text("local_history_status", bundle: FlareAppleUILocalization.bundle)
+                if !searchPresenter.state.status.isEmpty {
+                    Section {
+                        TimelinePagingListContent(data: searchPresenter.state.status)
+                    } header: {
+                        Text("local_history_status", bundle: FlareAppleUILocalization.bundle)
+                    }
                 }
             }
         }
@@ -178,11 +191,18 @@ public struct SearchScreen: View {
         if case .success(let users) = onEnum(of: searchPresenter.state.users) {
             headers.append(.title("local_history_user"))
             headers.append(TimelineListHeader(id: "users") { TimelineListUserStrip(users: users) })
+        } else if case .error(let error) = onEnum(of: searchPresenter.state.users) {
+            headers.append(TimelineListHeader(id: "users-error") {
+                ListErrorView(error: error.error) { _ = error.onRetry() }
+            })
+        } else if case .loading = onEnum(of: searchPresenter.state.users) {
+            headers.append(TimelineListHeader(id: "users-loading") { SearchSectionProgress() })
         }
-        headers.append(.title("local_history_status"))
+        let posts = searchPresenter.state.status
+        if !posts.isEmpty { headers.append(.title("local_history_status")) }
         return TimelineListRequest(
             key: searchPresenter.key,
-            content: .posts(searchPresenter.state.status),
+            content: posts.isEmpty ? .none : .posts(posts),
             headers: headers
         )
     }
@@ -209,21 +229,21 @@ public struct SearchScreen: View {
                                 }
                             })) {
                                 Label {
-                                    Text(account.handle.canonical)
+                                    Text(account.handle.display)
                                 } icon: {
-                                    AvatarView(data: account.avatar?.url, customHeader: account.avatar?.customHeaders)
+                                    AvatarView(data: account.avatar)
                                 }
                             }
                         }
                     } label: {
                         if let selectedAccount = searchPresenter.state.selectedAccount {
                             HStack {
-                                AvatarView(data: selectedAccount.avatar?.url, customHeader: selectedAccount.avatar?.customHeaders)
+                                AvatarView(data: selectedAccount.avatar)
                                     .frame(width: 24, height: 24)
-                                Text(selectedAccount.handle.canonical)
+                                Text(selectedAccount.handle.display)
                                 Image(fontAwesome: .chevronDown)
                                     .font(.footnote)
-                                    .foregroundStyle(.secondary)
+                                    .flareSecondaryText()
                                     .scaledToFit()
                                     .frame(width: 8, height: 8)
                                     .padding(8)
@@ -264,13 +284,12 @@ public struct SearchScreen: View {
                         isMacAccountPopoverPresented.toggle()
                     } label: {
                         AvatarView(
-                            data: toolbarAccount.avatar?.url,
-                            customHeader: toolbarAccount.avatar?.customHeaders
+                            data: toolbarAccount.avatar
                         )
                         .frame(width: 26, height: 26)
                     }
                     .buttonStyle(.plain)
-                    .help(toolbarAccount.handle.canonical)
+                    .help(toolbarAccount.handle.display)
                     .popover(isPresented: $isMacAccountPopoverPresented, arrowEdge: .top) {
                         MacSearchAccountPopover(
                             accounts: accounts,
@@ -337,10 +356,10 @@ private struct MacSearchAccountRow: View {
                     .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
                     .frame(width: 18)
 
-                AvatarView(data: account.avatar?.url, customHeader: account.avatar?.customHeaders)
+                AvatarView(data: account.avatar)
                     .frame(width: 28, height: 28)
 
-                Text(account.handle.canonical)
+                Text(account.handle.display)
                     .lineLimit(1)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -349,6 +368,7 @@ private struct MacSearchAccountRow: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .flareTextBackground(isSelected ? nil : .flareSystemGroupedBackground)
         .background(
             isSelected ? Color.accentColor.opacity(0.12) : Color.clear,
             in: RoundedRectangle(cornerRadius: 6, style: .continuous)

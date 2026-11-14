@@ -1,14 +1,12 @@
 package dev.dimension.flare.data.datasource.pixiv
 
 import dev.dimension.flare.common.Cacheable
-import dev.dimension.flare.data.datasource.microblog.ActionMenu
 import dev.dimension.flare.data.datasource.microblog.AuthenticatedMicroblogDataSource
 import dev.dimension.flare.data.datasource.microblog.DatabaseUpdater
 import dev.dimension.flare.data.datasource.microblog.PostEvent
 import dev.dimension.flare.data.datasource.microblog.ProfileTab
 import dev.dimension.flare.data.datasource.microblog.datasource.GalleryDataSource
 import dev.dimension.flare.data.datasource.microblog.datasource.GalleryDetail
-import dev.dimension.flare.data.datasource.microblog.datasource.GalleryOrientation
 import dev.dimension.flare.data.datasource.microblog.datasource.PinnableTimelineTabDataSource
 import dev.dimension.flare.data.datasource.microblog.datasource.PinnableTimelineTabSection
 import dev.dimension.flare.data.datasource.microblog.datasource.PostDataSource
@@ -21,8 +19,10 @@ import dev.dimension.flare.data.datasource.microblog.handler.RelationHandler
 import dev.dimension.flare.data.datasource.microblog.handler.UserHandler
 import dev.dimension.flare.data.datasource.microblog.loader.RelationActionType
 import dev.dimension.flare.data.datasource.microblog.paging.RemoteLoader
+import dev.dimension.flare.data.datasource.microblog.paging.ShareRepliesLoader
 import dev.dimension.flare.data.datasource.microblog.paging.notSupported
 import dev.dimension.flare.data.model.IconType
+import dev.dimension.flare.data.model.ProxyRef
 import dev.dimension.flare.data.model.tab.ShortcutSpec
 import dev.dimension.flare.data.model.tab.TimelineCandidate
 import dev.dimension.flare.data.model.tab.TimelineSpec
@@ -37,10 +37,8 @@ import dev.dimension.flare.media.UgoiraFrame
 import dev.dimension.flare.media.UgoiraMetadata
 import dev.dimension.flare.model.AccountType
 import dev.dimension.flare.model.MicroBlogKey
-import dev.dimension.flare.ui.model.ClickEvent
 import dev.dimension.flare.ui.model.UiHashtag
 import dev.dimension.flare.ui.model.UiIcon
-import dev.dimension.flare.ui.model.UiMedia
 import dev.dimension.flare.ui.model.UiProfile
 import dev.dimension.flare.ui.model.UiStrings
 import dev.dimension.flare.ui.model.UiText
@@ -79,6 +77,7 @@ internal class PixivDataSource(
 
     override val userHandler by lazy {
         UserHandler(
+            proxy = ProxyRef.forAccount(accountKey),
             host = accountKey.host,
             loader = loader,
         )
@@ -163,6 +162,17 @@ internal class PixivDataSource(
                 data = TimelineSpec.AccountBasedData(accountKey),
             ),
         )
+    }
+
+    override val addableTimelineTabs: ImmutableList<TimelineCandidate<*>> by lazy {
+        val data = TimelineSpec.AccountBasedData(accountKey)
+        buildList {
+            addAll(builtInTimelineTabs)
+            add(PixivPlatformSpec.rankingDayAiTimelineSpec.galleryCandidate(data))
+            add(PixivPlatformSpec.rankingDayR18TimelineSpec.galleryCandidate(data))
+            add(PixivPlatformSpec.rankingWeekR18TimelineSpec.galleryCandidate(data))
+            add(PixivPlatformSpec.rankingDayR18AiTimelineSpec.galleryCandidate(data))
+        }.toImmutableList()
     }
 
     override val shortcuts: ImmutableList<ShortcutSpec> by lazy {
@@ -319,6 +329,9 @@ internal class PixivDataSource(
             type = PixivWorkType.Illust,
         )
 
+    override fun shareReplies(statusKey: MicroBlogKey): RemoteLoader<UiTimelineV2> =
+        ShareRepliesLoader(galleryComments(statusKey), statusKey, comments = true)
+
     override fun context(statusKey: MicroBlogKey): RemoteLoader<UiTimelineV2> =
         PixivStatusDetailLoader(
             service = service,
@@ -338,51 +351,7 @@ internal class PixivDataSource(
     override fun galleryDetail(statusKey: MicroBlogKey): Cacheable<GalleryDetail> =
         postHandler.post(statusKey).map {
             val post = it.contentPostOrNull() ?: error("Gallery detail should be a post")
-            val actionItems = post.actions.filterIsInstance<ActionMenu.Item>()
-            val favouriteAction =
-                actionItems.firstOrNull { action ->
-                    val text = action.text as? ActionMenu.Item.Text.Localized
-                    text?.type == ActionMenu.Item.Text.Localized.Type.Favorite ||
-                        text?.type == ActionMenu.Item.Text.Localized.Type.UnFavorite
-                }
-            val favouriteText = favouriteAction?.text as? ActionMenu.Item.Text.Localized
-            val favourited = favouriteText?.type == ActionMenu.Item.Text.Localized.Type.UnFavorite
-            val favouriteCount = favouriteAction?.count?.value ?: 0L
-            GalleryDetail(
-                orientation = GalleryOrientation.Vertical,
-                statusKey = post.statusKey,
-                accountType = post.accountType,
-                url = "https://www.pixiv.net/artworks/${post.statusKey.id}",
-                images = post.images,
-                title =
-                    post.contentWarning
-                        ?.original
-                        ?.raw
-                        .orEmpty(),
-                author = post.user,
-                createdAt = post.createdAt,
-                content = post.content.original.takeUnless { content -> content.isEmpty },
-                isBookmarked = favourited,
-                bookmarkAction =
-                    ClickEvent.event(
-                        accountKey = accountKey,
-                        postEvent =
-                            PostEvent.Pixiv.Bookmark(
-                                postKey = post.statusKey,
-                                bookmarked = favourited,
-                                count = favouriteCount,
-                                accountKey = accountKey,
-                            ),
-                    ),
-                matrix =
-                    actionItems
-                        .mapNotNull { action ->
-                            GalleryDetail.Matrix(
-                                icon = action.icon ?: return@mapNotNull null,
-                                count = action.count?.value ?: return@mapNotNull null,
-                            )
-                        }.toImmutableList(),
-            )
+            post.toGalleryDetail(accountKey)
         } as Cacheable<GalleryDetail>
 
     override fun galleryComments(statusKey: MicroBlogKey): RemoteLoader<UiTimelineV2> =

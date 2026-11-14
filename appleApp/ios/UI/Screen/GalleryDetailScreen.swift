@@ -42,6 +42,7 @@ struct GalleryDetailScreen: View {
             GalleryDetailLoadingView()
         }
         .environment(\.timelineAppearance, timelineAppearance.galleryCardTimeline())
+        .flareTextBackground(.flareSystemGroupedBackground)
         .background(Color(.systemGroupedBackground))
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
@@ -52,28 +53,33 @@ struct GalleryDetailScreen: View {
                         navigateToProfile($0)
                     }
                 }
+            }
 
-                ToolbarItemGroup(placement: .primaryAction) {
-                    Button {
-                        switch onEnum(of: presenter.state.detail) {
-                        case .success(let success):
-                            navigateToShare(success.data)
-                        case .loading, .error:
-                            break
-                        }
-                    } label: {
-                        Image(fontAwesome: .shareNodes)
+            ToolbarItemGroup(placement: .primaryAction) {
+                if case .success(let success) = onEnum(of: presenter.state.detail) {
+                    GalleryTranslationButton(detail: success.data)
+                }
+                Button {
+                    switch onEnum(of: presenter.state.detail) {
+                    case .success(let success):
+                        navigateToShare(success.data)
+                    case .loading, .error:
+                        break
                     }
-                    .accessibilityLabel(Text("fx_share"))
-                    .disabled({
-                        switch onEnum(of: presenter.state.detail) {
-                        case .success:
-                            return false
-                        case .loading, .error:
-                            return true
-                        }
-                    }())
+                } label: {
+                    Image(fontAwesome: .shareNodes)
+                }
+                .accessibilityLabel(Text("fx_share"))
+                .disabled({
+                    switch onEnum(of: presenter.state.detail) {
+                    case .success:
+                        return false
+                    case .loading, .error:
+                        return true
+                    }
+                }())
 
+                if !isBigScreen {
                     Button {
                         switch onEnum(of: presenter.state.detail) {
                         case .success:
@@ -85,6 +91,7 @@ struct GalleryDetailScreen: View {
                         Image(fontAwesome: .chevronDown)
                     }
                     .accessibilityLabel(Text("show_gallery_info"))
+                    .accessibilityIdentifier("gallery-info")
                     .disabled({
                         switch onEnum(of: presenter.state.detail) {
                         case .success:
@@ -122,6 +129,7 @@ struct GalleryDetailScreen: View {
             }
             .padding(.bottom, 24)
         }
+        .timelineMediaViewport()
         .sheet(isPresented: $showInfoSheet) {
             NavigationStack {
                 ScrollView {
@@ -141,6 +149,12 @@ struct GalleryDetailScreen: View {
                     }
                     .padding(.horizontal, 16)
                     .padding(.vertical, 16)
+                }
+                .timelineMediaViewport()
+                .toolbar {
+                    ToolbarItem(placement: .primaryAction) {
+                        GalleryTranslationButton(detail: detail)
+                    }
                 }
                 .navigationTitle("Info")
                 .navigationBarTitleDisplayMode(.inline)
@@ -169,6 +183,7 @@ struct GalleryDetailScreen: View {
                 )
                 .frame(width: sidebarWidth(for: proxy.size.width))
                 .frame(maxHeight: .infinity)
+                .flareTextBackground(.flareSystemGroupedBackground)
                 .background(Color(.systemGroupedBackground))
             }
         }
@@ -363,7 +378,7 @@ private struct GalleryAuthorCard: View {
         ListCardView(index: 0, totalCount: 2) {
             HStack(spacing: 12) {
                 if let user = detail.author {
-                    AvatarView(data: user.avatar?.url, customHeader: user.avatar?.customHeaders)
+                    AvatarView(data: user.avatar)
                         .frame(width: 44, height: 44)
                         .onTapGesture {
                             onProfile(user)
@@ -376,13 +391,14 @@ private struct GalleryAuthorCard: View {
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(detail.title)
+                        .flarePrimaryText()
                         .font(.headline)
                         .fontWeight(.semibold)
                         .fixedSize(horizontal: false, vertical: true)
                     if let user = detail.author {
                         RichText(text: user.name)
                             .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .flareSecondaryText()
                             .lineLimit(1)
                     }
                 }
@@ -434,7 +450,7 @@ private struct GalleryMetadataRow: View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             DateTimeText(data: detail.createdAt, fullTime: true)
                 .font(.caption)
-                .foregroundStyle(.secondary)
+                .flareSecondaryText()
                 .lineLimit(1)
             ForEach(Array(detail.matrix.enumerated()), id: \.offset) { _, item in
                 HStack(alignment: .firstTextBaseline, spacing: 2) {
@@ -443,8 +459,9 @@ private struct GalleryMetadataRow: View {
                         Text(item.humanizedCount)
                     }
                 }
+                .fixedSize(horizontal: true, vertical: false)
                 .font(.caption)
-                .foregroundStyle(.secondary)
+                .flareSecondaryText()
                 .accessibilityLabel(
                     Text(
                         verbatim: item.humanizedCount.isEmpty
@@ -660,7 +677,7 @@ private struct GalleryCompactToolbarTitle: View {
             let user = detail.author
             HStack(spacing: 10) {
                 if let user {
-                    AvatarView(data: user.avatar?.url, customHeader: user.avatar?.customHeaders)
+                    AvatarView(data: user.avatar)
                         .frame(width: 32, height: 32)
                         .onTapGesture {
                             onProfile(user)
@@ -668,13 +685,14 @@ private struct GalleryCompactToolbarTitle: View {
                 }
                 VStack(alignment: .leading, spacing: 1) {
                     Text(detail.title)
+                        .flarePrimaryText()
                         .font(.subheadline)
                         .fontWeight(.semibold)
                         .lineLimit(1)
                     if let user {
                         RichText(text: user.name)
                             .font(.caption2)
-                            .foregroundStyle(.secondary)
+                            .flareSecondaryText()
                             .lineLimit(1)
                     }
                 }
@@ -717,6 +735,7 @@ private struct GallerySectionTitle: View {
 
     var body: some View {
         Text(title)
+            .flarePrimaryText()
             .font(.headline)
             .fontWeight(.semibold)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -763,6 +782,7 @@ struct GalleryCommentsScreen: View {
             suppressInitialRefreshIndicator: true
         )
         .environment(\.timelineAppearance, TimelineAppearance.companion.Default.galleryCardTimeline())
+        .flareTextBackground(.flareSystemGroupedBackground)
         .background(Color(.systemGroupedBackground))
         .navigationTitle("Comments")
         .navigationBarTitleDisplayMode(.inline)
@@ -792,6 +812,7 @@ private extension TimelineAppearance {
             showSensitiveContent: showSensitiveContent,
             expandContentWarning: expandContentWarning,
             expandMediaSize: expandMediaSize,
+            limitSingleMediaHeight: limitSingleMediaHeight,
             mediaLayout: mediaLayout,
             limitMediaGridToNine: limitMediaGridToNine,
             videoAutoplay: videoAutoplay,

@@ -23,7 +23,6 @@ import androidx.compose.material3.ListItem
 import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -37,16 +36,16 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import compose.icons.FontAwesomeIcons
 import compose.icons.fontawesomeicons.Solid
+import compose.icons.fontawesomeicons.solid.MagnifyingGlass
 import compose.icons.fontawesomeicons.solid.Robot
+import compose.icons.fontawesomeicons.solid.User
 import dev.dimension.flare.R
+import dev.dimension.flare.common.isEmpty
 import dev.dimension.flare.common.isLoading
 import dev.dimension.flare.common.isRefreshing
 import dev.dimension.flare.common.isSuccess
-import dev.dimension.flare.common.onLoading
 import dev.dimension.flare.common.onSuccess
 import dev.dimension.flare.data.model.TimelineDisplayMode
-import dev.dimension.flare.model.AccountType
-import dev.dimension.flare.model.MicroBlogKey
 import dev.dimension.flare.ui.common.items
 import dev.dimension.flare.ui.component.AvatarComponent
 import dev.dimension.flare.ui.component.FAIcon
@@ -63,12 +62,14 @@ import dev.dimension.flare.ui.component.searchContent
 import dev.dimension.flare.ui.component.status.AdaptiveOutlinedCard
 import dev.dimension.flare.ui.component.status.CommonStatusHeaderComponent
 import dev.dimension.flare.ui.component.status.LazyStatusVerticalStaggeredGrid
+import dev.dimension.flare.ui.component.status.ListEmptyView
 import dev.dimension.flare.ui.component.status.UserPlaceholder
+import dev.dimension.flare.ui.component.status.pagingError
 import dev.dimension.flare.ui.component.status.status
 import dev.dimension.flare.ui.model.onSuccess
 import dev.dimension.flare.ui.presenter.home.DiscoverPresenter
 import dev.dimension.flare.ui.presenter.home.DiscoverState
-import dev.dimension.flare.ui.presenter.home.SearchPresenter
+import dev.dimension.flare.ui.presenter.home.rememberDiscoverSearchState
 import dev.dimension.flare.ui.presenter.invoke
 import dev.dimension.flare.ui.theme.screenHorizontalPadding
 import kotlinx.coroutines.launch
@@ -76,10 +77,7 @@ import moe.tlaster.precompose.molecule.producePresenter
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-internal fun DiscoverScreen(
-    onUserClick: (AccountType, MicroBlogKey) -> Unit,
-    onAskAiClick: (String?) -> Unit,
-) {
+internal fun DiscoverScreen(onAskAiClick: (String?) -> Unit) {
     val state by producePresenter("discover") { discoverPresenter() }
     val lazyListState = rememberLazyStaggeredGridState()
     val isBigScreen = isBigScreen()
@@ -108,54 +106,47 @@ internal fun DiscoverScreen(
                         state.commitSearch(it)
                     },
                     trailingIcon =
-                        state.selectedAccount?.let { account ->
-                            if (!isBigScreen) {
-                                {
-                                    state.accounts.onSuccess { accounts ->
-                                        var showMenu by remember { mutableStateOf(false) }
-                                        IconButton(
-                                            onClick = {
-                                                if (accounts.size > 1) {
-                                                    showMenu = true
-                                                }
-                                            },
-                                        ) {
+                        if (!isBigScreen && (state.selectedAccount != null || state.canSwitchAccount)) {
+                            {
+                                state.accounts.onSuccess { accounts ->
+                                    var showMenu by remember { mutableStateOf(false) }
+                                    val account = state.selectedAccount
+                                    IconButton(onClick = { if (state.canSwitchAccount) showMenu = true }) {
+                                        if (account != null) {
                                             AvatarComponent(
                                                 data = account.avatar,
                                                 contentDescription =
                                                     stringResource(
                                                         R.string.select_account_current,
-                                                        account.handle.canonical,
+                                                        account.handle.display,
                                                     ),
                                             )
+                                        } else {
+                                            FAIcon(
+                                                FontAwesomeIcons.Solid.User,
+                                                contentDescription = stringResource(R.string.home_tab_discover_title),
+                                            )
                                         }
-                                        FlareDropdownMenu(
-                                            expanded = showMenu,
-                                            onDismissRequest = { showMenu = false },
-                                        ) {
-                                            accounts.forEach { profile ->
-                                                DropdownMenuItem(
-                                                    text = {
-                                                        Text(profile.handle.canonical)
-                                                    },
-                                                    leadingIcon = {
-                                                        AvatarComponent(
-                                                            data = profile.avatar,
-                                                            size = 18.dp,
-                                                        )
-                                                    },
-                                                    onClick = {
-                                                        state.setAccount(profile)
-                                                        showMenu = false
-                                                    },
-                                                )
-                                            }
+                                    }
+                                    FlareDropdownMenu(
+                                        expanded = showMenu,
+                                        onDismissRequest = { showMenu = false },
+                                    ) {
+                                        accounts.forEach { profile ->
+                                            DropdownMenuItem(
+                                                text = { Text(profile.handle.display) },
+                                                leadingIcon = { AvatarComponent(data = profile.avatar, size = 18.dp) },
+                                                onClick = {
+                                                    state.setAccount(profile)
+                                                    showMenu = false
+                                                },
+                                            )
                                         }
                                     }
                                 }
-                            } else {
-                                null
                             }
+                        } else {
+                            null
                         },
                     historyFloatingActionButton =
                         if (showAskAi) {
@@ -202,7 +193,7 @@ internal fun DiscoverScreen(
                 ) {
                     if (isBigScreen) {
                         state.accounts.onSuccess { accounts ->
-                            if (accounts.size > 1) {
+                            if (state.canSwitchAccount) {
                                 item(
                                     span = StaggeredGridItemSpan.FullLine,
                                 ) {
@@ -214,12 +205,12 @@ internal fun DiscoverScreen(
                                     ) {
                                         items(accounts) { profile ->
                                             FilterChip(
-                                                selected = state.selectedAccount?.key == profile.key,
+                                                selected = state.selectedAccountKey == profile.key,
                                                 onClick = {
                                                     state.setAccount(profile)
                                                 },
                                                 label = {
-                                                    Text(profile.handle.canonical)
+                                                    Text(profile.handle.display)
                                                 },
                                                 leadingIcon = {
                                                     AvatarComponent(
@@ -235,16 +226,17 @@ internal fun DiscoverScreen(
                         }
                     }
                     if (state.isInSearchMode) {
-                        searchContent(
-                            searchUsers = state.searchState.users,
-                            searchStatus = state.searchState.status,
-                            toUser = { key ->
-                                state.searchState.selectedAccount?.let { account ->
-                                    onUserClick(AccountType.Specific(account.key), key)
-                                }
-                            },
-                        )
+                        searchContent(state.searchState)
                     } else {
+                        if (state.hasNoRecommendations) {
+                            item(span = StaggeredGridItemSpan.FullLine) {
+                                ListEmptyView(
+                                    modifier = Modifier.fillMaxWidth().padding(vertical = 32.dp),
+                                    text = stringResource(R.string.empty_discover),
+                                    icon = FontAwesomeIcons.Solid.MagnifyingGlass,
+                                )
+                            }
+                        }
                         if (state.users.isLoading || state.users.isSuccess()) {
                             item(
                                 span = StaggeredGridItemSpan.FullLine,
@@ -300,14 +292,6 @@ internal fun DiscoverScreen(
                                             CommonStatusHeaderComponent(
                                                 modifier = Modifier.padding(8.dp),
                                                 data = item,
-                                                onUserClick = {
-                                                    state.selectedAccount?.let { account ->
-                                                        onUserClick(
-                                                            AccountType.Specific(account.key),
-                                                            item.key,
-                                                        )
-                                                    }
-                                                },
                                             )
                                         }
                                     }
@@ -315,6 +299,7 @@ internal fun DiscoverScreen(
                             }
                         }
 
+                        pagingError(state.users)
                         state.hashtags.onSuccess {
                             item(
                                 span = StaggeredGridItemSpan.FullLine,
@@ -356,7 +341,7 @@ internal fun DiscoverScreen(
                                         AdaptiveOutlinedCard(
                                             modifier =
                                                 Modifier
-                                                    .clickable {
+                                                    .clickable(enabled = state.canSearchPosts && hashtag != null) {
                                                         hashtag?.searchContent?.let { it1 ->
                                                             state.commitSearch(
                                                                 it1,
@@ -392,42 +377,17 @@ internal fun DiscoverScreen(
                                 }
                             }
                         }
-                        state.status
-                            .onSuccess {
-                                item(
-                                    span = StaggeredGridItemSpan.FullLine,
-                                ) {
-                                    ListItem(
-                                        colors =
-                                            ListItemDefaults
-                                                .colors(
-                                                    containerColor = Color.Transparent,
-                                                ),
-                                        elevation = ListItemDefaults.elevation(),
-                                        content = {
-                                            Text(text = stringResource(R.string.discover_status))
-                                        },
-                                    )
-                                }
-                                status(state.status)
-                            }.onLoading {
-                                item(
-                                    span = StaggeredGridItemSpan.FullLine,
-                                ) {
-                                    ListItem(
-                                        colors =
-                                            ListItemDefaults
-                                                .colors(
-                                                    containerColor = Color.Transparent,
-                                                ),
-                                        elevation = ListItemDefaults.elevation(),
-                                        content = {
-                                            Text(text = stringResource(R.string.discover_status))
-                                        },
-                                    )
-                                }
-                                status(state.status)
+                        pagingError(state.hashtags)
+                        if (!state.status.isEmpty) {
+                            item(span = StaggeredGridItemSpan.FullLine) {
+                                ListItem(
+                                    colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+                                    elevation = ListItemDefaults.elevation(),
+                                    content = { Text(text = stringResource(R.string.discover_status)) },
+                                )
                             }
+                            status(state.status)
+                        }
                     }
                 }
             },
@@ -441,20 +401,11 @@ private fun discoverPresenter() =
         val scope = rememberCoroutineScope()
         val state = remember { DiscoverPresenter() }.invoke()
         val searchBarState = searchBarPresenter()
-        val searchState =
-            remember {
-                SearchPresenter(accountType = state.selectedAccountType)
-            }.invoke()
-
-        LaunchedEffect(state.selectedAccount) {
-            state.selectedAccount?.let { profile ->
-                searchState.setAccount(profile)
-            }
-        }
+        val searchState = rememberDiscoverSearchState(state)
 
         object : DiscoverState by state, SearchBarState by searchBarState {
             val searchState = searchState
-            val isInSearchMode = queryTextState.text.isNotEmpty()
+            val isInSearchMode = searchState.searching
             val refreshing =
                 if (!isInSearchMode) {
                     state.users.isRefreshing ||
@@ -466,20 +417,11 @@ private fun discoverPresenter() =
                 }
 
             fun refresh() {
+                if (!state.isAccountReady) return
                 if (isInSearchMode) {
-                    searchState.search(queryTextState.text.toString())
+                    scope.launch { searchState.refreshSuspend() }
                 } else {
-                    scope.launch {
-                        state.users.onSuccess {
-                            refreshSuspend()
-                        }
-                        state.status.onSuccess {
-                            refreshSuspend()
-                        }
-                        state.hashtags.onSuccess {
-                            refreshSuspend()
-                        }
-                    }
+                    scope.launch { state.refreshSuspend() }
                 }
             }
 
@@ -491,6 +433,7 @@ private fun discoverPresenter() =
 
             fun clearSearch() {
                 searchBarState.setQuery("")
+                searchState.search("")
             }
         }
     }

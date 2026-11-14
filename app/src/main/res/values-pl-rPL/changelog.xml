@@ -5,11 +5,10 @@
     <string name="changelog_current"><![CDATA[
             <span>Wersja %1$s:</span>
             <ul>
-                <li>Dodano odtwarzanie animacji Ugoira z Pixiv i zapisywanie ich jako filmów MP4.</li>
-                <li>Przeciągnij w górę w przeglądarce multimediów, aby zobaczyć szczegóły wpisu i działania.</li>
-                <li>Bluesky obsługuje teraz przesyłanie GIF i MOV. Naprawiono zapisywanie filmów, a główna oś czasu ukrywa odpowiedzi do kont, których nie obserwujesz.</li>
-                <li>Ulepszono przesyłanie multimediów i ponawianie wysyłania szkiców.</li>
-                <li>Poprawki błędów i ulepszenia wydajności.</li>
+                <li>Filmy zapamiętują szybkość odtwarzania, a nowe opcje sięgają 16×.</li>
+                <li>Przełączaj między oryginałem a tłumaczeniem w artykułach, wpisach RSS i szczegółach galerii.</li>
+                <li>Wyszukiwanie i odkrywanie pokazują tylko sekcje obsługiwane przez wybrane konto.</li>
+                <li>Naprawiono niektóre problemy z logowaniem przez przeglądarkę.</li>
             </ul>
         ]]></string>
 </resources>

@@ -60,6 +60,7 @@ import compose.icons.FontAwesomeIcons
 import compose.icons.fontawesomeicons.Solid
 import compose.icons.fontawesomeicons.solid.CaretUp
 import compose.icons.fontawesomeicons.solid.EllipsisVertical
+import compose.icons.fontawesomeicons.solid.Images
 import compose.icons.fontawesomeicons.solid.ShareNodes
 import dev.dimension.flare.R
 import dev.dimension.flare.common.PagingState
@@ -81,6 +82,7 @@ import dev.dimension.flare.ui.component.FAIcon
 import dev.dimension.flare.ui.component.FlareScaffold
 import dev.dimension.flare.ui.component.FlareTopAppBar
 import dev.dimension.flare.ui.component.GalleryMedia
+import dev.dimension.flare.ui.component.GalleryTranslationButton
 import dev.dimension.flare.ui.component.LocalTimelineAppearance
 import dev.dimension.flare.ui.component.NetworkImage
 import dev.dimension.flare.ui.component.RichText
@@ -89,6 +91,7 @@ import dev.dimension.flare.ui.component.placeholder
 import dev.dimension.flare.ui.component.status.AdaptiveCard
 import dev.dimension.flare.ui.component.status.GalleryTimelineItem
 import dev.dimension.flare.ui.component.status.LazyStatusVerticalStaggeredGrid
+import dev.dimension.flare.ui.component.status.ListEmptyView
 import dev.dimension.flare.ui.component.status.StatusActionButton
 import dev.dimension.flare.ui.component.status.StatusItem
 import dev.dimension.flare.ui.component.status.status
@@ -253,7 +256,7 @@ private fun GalleryCardTimeline(content: @Composable () -> Unit) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun CompactGalleryContent(
+internal fun CompactGalleryContent(
     detail: GalleryDetail,
     comments: PagingState<UiTimelineV2>,
     recommendations: PagingState<UiTimelineV2>,
@@ -263,31 +266,35 @@ private fun CompactGalleryContent(
     onDismissInfoSheet: () -> Unit,
 ) {
     val gridState = rememberLazyStaggeredGridState()
+    val uriHandler = LocalUriHandler.current
     if (showInfoSheet) {
         ModalBottomSheet(
             onDismissRequest = onDismissInfoSheet,
         ) {
-            LazyVerticalStaggeredGrid(
-                columns = StaggeredGridCells.Adaptive(164.dp),
-                contentPadding =
-                    PaddingValues(
-                        start = screenHorizontalPadding,
-                        end = screenHorizontalPadding,
-                        bottom = 32.dp,
-                    ),
-                horizontalArrangement = Arrangement.spacedBy(GalleryGridSpacing),
-                verticalItemSpacing = CompactTimelineSpacing,
-                modifier = Modifier.fillMaxHeight(0.9f),
-            ) {
-                galleryAfterImagesItems(
-                    detail = detail,
-                    comments = comments,
-                    recommendations = recommendations,
-                    navigate = { route ->
-                        onDismissInfoSheet()
-                        navigate(route)
-                    },
-                )
+            // Dialog roots replace LocalUriHandler; keep internal events in the app.
+            CompositionLocalProvider(LocalUriHandler provides uriHandler) {
+                LazyVerticalStaggeredGrid(
+                    columns = StaggeredGridCells.Adaptive(164.dp),
+                    contentPadding =
+                        PaddingValues(
+                            start = screenHorizontalPadding,
+                            end = screenHorizontalPadding,
+                            bottom = 32.dp,
+                        ),
+                    horizontalArrangement = Arrangement.spacedBy(GalleryGridSpacing),
+                    verticalItemSpacing = CompactTimelineSpacing,
+                    modifier = Modifier.fillMaxHeight(0.9f),
+                ) {
+                    galleryAfterImagesItems(
+                        detail = detail,
+                        comments = comments,
+                        recommendations = recommendations,
+                        navigate = { route ->
+                            onDismissInfoSheet()
+                            navigate(route)
+                        },
+                    )
+                }
             }
         }
     }
@@ -549,6 +556,15 @@ private fun GallerySideBar(
                             verticalItemSpacing = GalleryGridSpacing,
                             modifier = Modifier.fillMaxSize(),
                         ) {
+                            recommendations.onEmpty {
+                                item(span = StaggeredGridItemSpan.FullLine) {
+                                    ListEmptyView(
+                                        modifier = Modifier.fillMaxWidth().padding(vertical = 32.dp),
+                                        text = stringResource(R.string.empty_gallery_recommendations),
+                                        icon = FontAwesomeIcons.Solid.Images,
+                                    )
+                                }
+                            }
                             recommendationItems(recommendations)
                         }
                     }
@@ -638,6 +654,7 @@ private fun GalleryAuthorCard(
                     )
                 }
             }
+            GalleryTranslationButton(detail)
             StatusActionButton(
                 icon =
                     if (detail.isBookmarked) {
@@ -956,24 +973,20 @@ private fun GalleryTopAppBar(
             BackButton(onBack = onBack)
         },
         actions = {
+            if (!isBigScreen) {
+                detailState.onSuccess { GalleryTranslationButton(it) }
+            }
+            val detailLoaded = detailState is UiState.Success
+            IconButton(
+                enabled = detailLoaded,
+                onClick = onShare,
+            ) {
+                FAIcon(
+                    imageVector = FontAwesomeIcons.Solid.ShareNodes,
+                    contentDescription = stringResource(R.string.gallery_detail_share_content_description),
+                )
+            }
             if (isBigScreen) {
-                val shareEnabled =
-                    when (detailState) {
-                        is UiState.Success -> true
-
-                        is UiState.Loading,
-                        is UiState.Error,
-                        -> false
-                    }
-                IconButton(
-                    enabled = shareEnabled,
-                    onClick = onShare,
-                ) {
-                    FAIcon(
-                        imageVector = FontAwesomeIcons.Solid.ShareNodes,
-                        contentDescription = stringResource(R.string.gallery_detail_share_content_description),
-                    )
-                }
                 IconButton(onClick = {}) {
                     FAIcon(
                         imageVector = FontAwesomeIcons.Solid.EllipsisVertical,
@@ -981,16 +994,8 @@ private fun GalleryTopAppBar(
                     )
                 }
             } else {
-                val expandEnabled =
-                    when (detailState) {
-                        is UiState.Success -> true
-
-                        is UiState.Loading,
-                        is UiState.Error,
-                        -> false
-                    }
                 IconButton(
-                    enabled = expandEnabled,
+                    enabled = detailLoaded,
                     onClick = onExpand,
                 ) {
                     FAIcon(

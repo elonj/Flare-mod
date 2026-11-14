@@ -3,11 +3,10 @@
     <string name="changelog_current"><![CDATA[
             <span>Versione %1$s:</span>
             <ul>
-                <li>Aggiunte la riproduzione delle animazioni Ugoira di Pixiv e la possibilità di salvarle come video MP4.</li>
-                <li>Trascina verso l’alto nel visualizzatore multimediale per vedere dettagli e azioni del post.</li>
-                <li>Bluesky supporta il caricamento di GIF e MOV. Corretto il salvataggio dei video; la timeline principale nasconde le risposte ad account che non segui.</li>
-                <li>Migliorati il caricamento dei media e il reinvio delle bozze.</li>
-                <li>Correzioni di bug e miglioramenti delle prestazioni.</li>
+                <li>I video ricordano la velocità di riproduzione, con nuove opzioni fino a 16×.</li>
+                <li>Passa dal testo originale alla traduzione negli articoli, negli elementi RSS e nei dettagli della galleria.</li>
+                <li>Ricerca ed Esplora mostrano solo le sezioni supportate dall’account selezionato.</li>
+                <li>Risolti alcuni problemi di accesso via web.</li>
             </ul>
         ]]></string>
     <string name="changelog_title">Bentornato!</string>

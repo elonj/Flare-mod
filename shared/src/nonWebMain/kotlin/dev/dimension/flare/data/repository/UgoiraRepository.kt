@@ -3,6 +3,7 @@ package dev.dimension.flare.data.repository
 import dev.dimension.flare.common.PlatformDispatchers
 import dev.dimension.flare.common.decodeJson
 import dev.dimension.flare.common.encodeJson
+import dev.dimension.flare.data.datasource.microblog.capabilities
 import dev.dimension.flare.data.datasource.microblog.datasource.GalleryDataSource
 import dev.dimension.flare.data.io.FileStorage
 import dev.dimension.flare.data.io.OkioFileStorage
@@ -40,8 +41,8 @@ internal fun ugoiraRepository(
     val client = ugoiraHttpClient()
     scope.coroutineContext[Job]?.invokeOnCompletion { client.close() }
     return UgoiraRepository(storage, scope, UgoiraDownloader(storage.fileSystem, client)) { media ->
-        val account = requireNotNull(accountRepository.find(media.accountKey)) { "Pixiv account is unavailable" }
-        val dataSource = accountRepository.getOrCreateDataSource(account) as GalleryDataSource
+        val account = requireNotNull(accountRepository.find(media.accountKey)) { "Media account is unavailable" }
+        val dataSource = requireNotNull(accountRepository.getOrCreateDataSource(account).capabilities.gallery) { "Gallery is unavailable" }
         dataSource.ugoiraMetadata(media.statusKey)
     }
 }
@@ -80,7 +81,11 @@ internal actual class UgoiraRepository(
         media: UiMedia.Ugoira,
         onProgress: (Float) -> Unit,
     ): UgoiraAnimation {
-        val key = "${media.accountKey}|${media.statusKey}|${media.originalFrameUrl}".encodeUtf8().sha256().hex()
+        val key =
+            buildString {
+                append("${media.accountKey}|${media.statusKey}|${media.originalFrameUrl}")
+                if (!media.customHeaders.isNullOrEmpty()) append("|${media.cacheKey}")
+            }.encodeUtf8().sha256().hex()
         val entry =
             mutex.withLock {
                 check(entries[key]?.invalidated != true) { "Ugoira cache is in use; retry after playback or export releases it" }

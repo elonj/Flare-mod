@@ -34,6 +34,31 @@ struct GalleryDetailScreen: View {
         }
         .background(Color.flareSystemGroupedBackground)
         .navigationTitle("")
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                if case .success(let success) = onEnum(of: presenter.state.detail) {
+                    GalleryTranslationButton(detail: success.data)
+                }
+            }
+            ToolbarItem(placement: .primaryAction) {
+                if case .success(let success) = onEnum(of: presenter.state.detail) {
+                    let detail = success.data
+                    MacStatusShareMenu(
+                        data: MacStatusShareData(
+                            statusKey: detail.statusKey,
+                            accountType: detail.accountType,
+                            shareUrl: detail.url
+                        ),
+                        onShareScreenshot: {
+                            onNavigate(.statusShareSheet(detail.accountType, detail.statusKey, detail.url, nil, nil))
+                        }
+                    ) {
+                        Image(fontAwesome: .shareNodes)
+                    }
+                    .accessibilityLabel(Text("fx_share"))
+                }
+            }
+        }
     }
 
     private func compatBody(detail: GalleryDetail) -> some View {
@@ -186,7 +211,7 @@ private struct GalleryAuthorCard: View {
     var body: some View {
         HStack(spacing: 12) {
             if let user = detail.author {
-                AvatarView(data: user.avatar?.url, customHeader: user.avatar?.customHeaders)
+                AvatarView(data: user.avatar)
                     .frame(width: 44, height: 44)
                     .onTapGesture {
                         onProfile(user)

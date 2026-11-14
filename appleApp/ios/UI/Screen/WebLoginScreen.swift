@@ -1,120 +1,135 @@
 import SwiftUI
 import WebKit
-import Observation
 import FlareAppleUI
+import FlareAppleCore
 
 @available(iOS 26.0, *)
 struct WebLoginScreen: View {
     @Environment(\.dismiss) var dismiss
-    @State private var viewModel: WebLoginViewModel?
-    private let onCookie: (String) -> Void
-    let url: String
-    init(
-        onCookie: @escaping (String) -> Void,
-        url: String
-    ) {
-        self.url = url
-        self.onCookie = onCookie
-    }
+    let session: WebLoginSession
+    private var viewModel: WebLoginViewModel? { session.viewModel as? WebLoginViewModel }
+
     var body: some View {
+        let initialOrigin = webLoginHTTPSOrigin(URL(string: session.url))
         NavigationStack {
-            if let viewModel, viewModel.canShowWebView {
-                WebView(viewModel.page)
-                    .onAppear {
-                        if let requestURL = URL(string: url) {
-                            viewModel.page.load(requestURL)
-                        }
+            ProxyWebContent.content(proxy: session.proxy) { route in
+                Group {
+                    if let viewModel, viewModel.route === route {
+                        WebView(viewModel.page)
+                            .task { await viewModel.pollCookies() }
+                    } else {
+                        ProgressView()
                     }
-                    .toolbar {
-                        ToolbarItem(placement: .cancellationAction) {
-                            Button {
-                                dismiss()
-                            } label: {
-                                Label {
-                                    Text("Cancel")
-                                } icon: {
-                                    Image(systemName: "xmark")
-                                }
-                            }
-                        }
-                    }
+                }
+                .task(id: ObjectIdentifier(route)) { [session] in
+                    let viewModel = session.viewModel as? WebLoginViewModel
+                    guard route.isValid, viewModel?.route !== route else { return }
+                    session.viewModel = WebLoginViewModel(onCookie: { [weak session] cookies in
+                        session?.checkCookies(cookies)
+                    }, url: session.url, route: route)
+                }
             }
-        }
-        .task {
-            // Initialize after state is installed so view rebuilds don't clear cookies again.
-            guard viewModel == nil else { return }
-            viewModel = WebLoginViewModel(onCookie: onCookie, url: url)
+            .toolbar {
+                ToolbarItem(placement: .principal) {
+                    WebLoginOriginLabel(current: webLoginHTTPSOrigin(viewModel?.page.url) ?? initialOrigin ?? "", initial: initialOrigin)
+                }
+                ToolbarItem(placement: .cancellationAction) {
+                    Button { dismiss() } label: { Label("Cancel", systemImage: "xmark") }
+                }
+            }
         }
     }
 }
 
 @available(iOS 26.0, *)
 struct NavigationDecider: WebPage.NavigationDeciding {
-    let onCookie: (String) -> Void
-    let config: WebPage.Configuration
-    let url: URL?
+    let onCookie: ([HTTPCookie]) -> Void
+    let route: WebViewProxyRoute
+    func decidePolicy(for action: WebPage.NavigationAction, preferences: inout WebPage.NavigationPreferences) async -> WKNavigationActionPolicy {
+        guard route.isValid else { return .cancel }
+        guard action.target?.isMainFrame != false else { return .allow }
+        return webLoginHTTPSOrigin(action.request.url) == nil ? .cancel : .allow
+    }
     func decidePolicy(for response: WebPage.NavigationResponse) async -> WKNavigationResponsePolicy {
+        guard route.isValid else { return .cancel }
         getCookies()
-        return .allow
+        return webLoginHTTPSOrigin(response.response.url) == nil ? .cancel : .allow
     }
     func getCookies() {
-        WKWebsiteDataStore.default().httpCookieStore.getAllCookies { (cookies) in
-            let cookieString = cookieHeaderString(from: cookies, for: url)
-            self.onCookie(cookieString)
+        route.dataStore.httpCookieStore.getAllCookies { (cookies) in
+            guard route.isValid else { return }
+            self.onCookie(cookies)
         }
-    }
-    private func cookieHeaderString(from cookies: [HTTPCookie], for url: URL?) -> String {
-        let host = url?.host?.lowercased()
-        let filtered = cookies.filter { cookie in
-            guard let host = host else { return true }
-            let domain = cookie.domain.lowercased()
-            return domain == host || (domain.hasPrefix(".") && (domain.hasSuffix(host) || host.hasSuffix(domain)))
-        }
-        return filtered.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
     }
 }
 
 @available(iOS 26.0, *)
-@Observable
-final class WebLoginViewModel {
-    var config: WebPage.Configuration
-    var page: WebPage
-    let decider: NavigationDecider
-    let onCookie: (String) -> Void
+final class WebLoginViewModel: WebLoginPageModel {
+    let route: WebViewProxyRoute
+    let page: WebPage
+    private let decider: NavigationDecider
+    private let navigationTask: Task<Void, Never>
+
     init(
-        onCookie: @escaping (String) -> Void,
-        url: String
+        onCookie: @escaping ([HTTPCookie]) -> Void,
+        url: String,
+        route: WebViewProxyRoute
     ) {
+        self.route = route
         var conf = WebPage.Configuration()
         conf.defaultNavigationPreferences.allowsContentJavaScript = true
-        self.config = conf
-        self.decider = .init(onCookie: onCookie, config: conf, url: .init(string: url))
-        self.page = WebPage(configuration: conf, navigationDecider: decider)
-        self.onCookie = onCookie
-        self.page.customUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 Mobile/15E148 Safari/604.1"
-        clearCookie()
-    }
-    var canShowWebView = false
-    func getCookies() {
-        config.websiteDataStore.httpCookieStore.getAllCookies { (cookies) in
-            var cookieString = ""
-            for cookie in cookies {
-                cookieString += "\(cookie.name)=\(cookie.value); "
+        conf.websiteDataStore = route.dataStore
+        self.decider = .init(onCookie: onCookie, route: route)
+        let page = WebPage(configuration: conf, navigationDecider: decider)
+        self.page = page
+        page.customUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 Mobile/15E148 Safari/604.1"
+        navigationTask = Task {
+            guard !Task.isCancelled, route.isValid else { return }
+            let navigations = page.navigations
+            if let requestURL = URL(string: url), webLoginHTTPSOrigin(requestURL) != nil {
+                page.load(requestURL)
             }
-            self.onCookie(cookieString)
+            do {
+                for try await _ in navigations {}
+            } catch {
+                if !Task.isCancelled { route.report(error) }
+            }
+        }
+        route.onStop { [weak self, weak page] in
+            self?.navigationTask.cancel()
+            page?.stopLoading()
+            page?.load(html: "")
         }
     }
-    
-    func clearCookie() {
-        let dataStore = WKWebsiteDataStore.default()
-        dataStore.fetchDataRecords(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes()) { records in
-            dataStore.removeData(
-                ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(),
-                for: records,
-                completionHandler: {
-                    self.canShowWebView = true
-                }
-            )
+
+    deinit { navigationTask.cancel() }
+
+    func pollCookies() async {
+        while !Task.isCancelled && route.isValid {
+            try? await Task.sleep(for: .seconds(2))
+            guard !Task.isCancelled && route.isValid else { return }
+            decider.getCookies()
         }
     }
+}
+
+struct WebLoginOriginLabel: View {
+    let current: String
+    let initial: String?
+
+    var body: some View {
+        Text(current)
+            .lineLimit(1)
+            .foregroundStyle(current.isEmpty || current == initial ? Color.secondary : Color.red)
+    }
+}
+
+func webLoginHTTPSOrigin(_ url: URL?) -> String? {
+    guard let url, url.scheme?.lowercased() == "https", let host = url.host, !host.isEmpty, url.user == nil, url.password == nil else {
+        return nil
+    }
+    if let port = url.port, port != 443 {
+        return "https://\(host):\(port)"
+    }
+    return "https://\(host)"
 }

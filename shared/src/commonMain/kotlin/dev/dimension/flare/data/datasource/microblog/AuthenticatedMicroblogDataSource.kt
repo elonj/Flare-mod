@@ -3,6 +3,7 @@ package dev.dimension.flare.data.datasource.microblog
 import dev.dimension.flare.data.datasource.microblog.paging.RemoteLoader
 import dev.dimension.flare.model.MicroBlogKey
 import dev.dimension.flare.ui.model.UiTimelineV2
+import kotlinx.coroutines.flow.first
 import kotlin.native.HiddenFromObjC
 
 @HiddenFromObjC
@@ -20,6 +21,24 @@ public interface NotificationTimelineDataSource : AuthenticatedMicroblogDataSour
 @HiddenFromObjC
 public interface ComposeDataSource : AuthenticatedMicroblogDataSource {
     public suspend fun compose(
+        data: ComposeData,
+        progress: () -> Unit,
+    ) {
+        // ponytail: Use cached/default limits like the editor; add provider expiry if stale limits cause failures.
+        val config = composeConfig(data.type)
+        require(data.type in config.supportedTypes) { "This account does not support ${data.type.name.lowercase()} posts." }
+        val visibility = data.visibility ?: config.visibility?.defaultVisibility ?: UiTimelineV2.Post.Visibility.Public
+        require(
+            config.visibility?.allVisibilities?.contains(visibility)
+                ?: (visibility == UiTimelineV2.Post.Visibility.Public),
+        ) { "The selected visibility is not supported by this account for this post." }
+        val remaining = config.text?.remainingLength(data.content, data.spoilerText)?.first()
+        require(remaining?.isValid != false) { "Post text exceeds the platform limits." }
+        publish(data.copy(visibility = visibility), progress)
+    }
+
+    // Platform hook; callers use compose to validate before uploading media.
+    public suspend fun publish(
         data: ComposeData,
         progress: () -> Unit,
     )

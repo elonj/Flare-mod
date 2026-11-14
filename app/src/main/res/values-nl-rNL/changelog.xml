@@ -5,11 +5,10 @@
     <string name="changelog_current"><![CDATA[
             <span>Versie %1$s:</span>
             <ul>
-                <li>Afspelen van Pixiv Ugoira-animaties en opslaan als MP4-video’s toegevoegd.</li>
-                <li>Sleep omhoog in de mediaviewer om berichtdetails en acties te bekijken.</li>
-                <li>Bluesky ondersteunt nu GIF- en MOV-uploads. Het opslaan van video’s is hersteld en de starttijdlijn verbergt antwoorden aan accounts die je niet volgt.</li>
-                <li>Uploads van media en opnieuw verzenden van concepten verbeterd.</li>
-                <li>Bugfixes en prestatieverbeteringen.</li>
+                <li>Video’s onthouden je afspeelsnelheid, met nieuwe opties tot 16×.</li>
+                <li>Wissel tussen de oorspronkelijke en vertaalde tekst in artikelen, RSS-items en galerijdetails.</li>
+                <li>Zoeken en Ontdekken tonen alleen onderdelen die het gekozen account ondersteunt.</li>
+                <li>Enkele problemen met aanmelden via het web zijn opgelost.</li>
             </ul>
         ]]></string>
 </resources>

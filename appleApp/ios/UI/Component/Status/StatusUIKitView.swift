@@ -199,7 +199,10 @@ final class StatusUIKitView: UIView, UIGestureRecognizerDelegate, ManualLayoutMe
         guard contentWarningToggle.actions(forTarget: nil, forControlEvent: .touchUpInside)?.isEmpty ?? true else { return }
         contentWarningToggle.contentHorizontalAlignment = .leading
         contentWarningToggle.addAction(
-            UIAction { [weak self] _ in self?.toggleExpand() },
+            UIAction { [weak self] _ in
+                guard let self else { return }
+                self.setExpanded(!self.expand)
+            },
             for: .touchUpInside
         )
     }
@@ -209,7 +212,7 @@ final class StatusUIKitView: UIView, UIGestureRecognizerDelegate, ManualLayoutMe
         expandMoreButton.contentHorizontalAlignment = .leading
         expandMoreButton.setTitle(String(localized: "mastodon_item_show_more"), for: .normal)
         expandMoreButton.addAction(
-            UIAction { [weak self] _ in self?.expandOnly() },
+            UIAction { [weak self] _ in self?.setExpanded(true) },
             for: .touchUpInside
         )
     }
@@ -503,6 +506,7 @@ final class StatusUIKitView: UIView, UIGestureRecognizerDelegate, ManualLayoutMe
 
     func prepareForFitting(width: CGFloat) {
         guard width.isFinite, width > 0 else { return }
+        updateSingleMediaHeightLimit()
         let widthKey = Self.fittingWidthKey(width)
         guard lastPreparedFittingWidthKey != widthKey else { return }
         lastPreparedFittingWidthKey = widthKey
@@ -516,7 +520,7 @@ final class StatusUIKitView: UIView, UIGestureRecognizerDelegate, ManualLayoutMe
         if let mediaViewStorage {
             let mediaWidth = mediaViewStorage.isShowingCarousel
                 ? width + carouselEdgePadding * 2
-                : contentWidth
+                : mediaViewStorage.fittingWidth(for: contentWidth)
             mediaViewStorage.bounds = CGRect(x: 0, y: 0, width: mediaWidth, height: mediaViewStorage.bounds.height)
         }
         if let normalCardViewStorage {
@@ -594,6 +598,7 @@ final class StatusUIKitView: UIView, UIGestureRecognizerDelegate, ManualLayoutMe
     @discardableResult
     private func performLayout(width: CGFloat, assignFrames: Bool) -> CGFloat {
         guard width > 0 else { return 0 }
+        updateSingleMediaHeightLimit()
         var y: CGFloat = 0
 
         // Parents (vertical, spacing 0)
@@ -637,7 +642,8 @@ final class StatusUIKitView: UIView, UIGestureRecognizerDelegate, ManualLayoutMe
             if isCarousel, wantsAvatar {
                 innerY = max(innerY, y + Self.avatarSize + 8)
             }
-            let childWidth = isCarousel ? width + carouselEdgePadding * 2 : contentWidth
+            let childWidth = isCarousel ? width + carouselEdgePadding * 2
+                : child === mediaViewStorage ? mediaViewStorage!.fittingWidth(for: contentWidth) : contentWidth
             let childX = isCarousel ? -carouselEdgePadding : contentX
             let h = childHeight(of: child, for: childWidth)
             if assignFrames { child.frame = CGRect(x: childX, y: innerY, width: childWidth, height: h) }
@@ -670,6 +676,18 @@ final class StatusUIKitView: UIView, UIGestureRecognizerDelegate, ManualLayoutMe
         isQuote ? 8 : carouselOuterHorizontalPadding
     }
 
+    private func updateSingleMediaHeightLimit() {
+        guard let mediaViewStorage else { return }
+        let maximumHeight: CGFloat? = appearance.expandMediaSize && appearance.limitSingleMediaHeight
+            ? appearance.singleMediaMaxHeight ?? CGFloat(TimelineSingleMediaLayout.shared.maximumHeight(
+            viewportHeight: Float(window.map { $0.bounds.inset(by: $0.safeAreaInsets).height } ?? 0)
+        )) : nil
+        if mediaViewStorage.singleMediaMaxHeight != maximumHeight {
+            mediaViewStorage.singleMediaMaxHeight = maximumHeight
+            lastPreparedFittingWidthKey = nil
+        }
+    }
+
     private func fittingContentColumnWidth(for width: CGFloat) -> CGFloat {
         let wantsAvatar = showAsFullWidth && data?.user != nil
         let avatarWidth = wantsAvatar ? Self.avatarSize + Self.mainRowSpacing : 0
@@ -689,8 +707,8 @@ final class StatusUIKitView: UIView, UIGestureRecognizerDelegate, ManualLayoutMe
         if newWantsAvatar, let user = data.user {
             let avatarView = resolvedAvatarView()
             avatarView.avatarShape = appearance.avatarShape
-            avatarView.set(url: user.avatar?.url, customHeaders: user.avatar?.customHeaders)
-            avatarView.accessibilityLabel = openProfileAccessibilityLabel(handle: user.handle.canonical)
+            avatarView.set(media: user.avatar)
+            avatarView.accessibilityLabel = openProfileAccessibilityLabel(handle: user.handle.display)
             if avatarView.superview !== self { addSubview(avatarView) }
         } else if avatarViewStorage?.superview === self {
             avatarViewStorage?.removeFromSuperview()
@@ -759,17 +777,17 @@ final class StatusUIKitView: UIView, UIGestureRecognizerDelegate, ManualLayoutMe
         if showAsFullWidth {
             let userHeaderFull = resolvedUserHeaderFull()
             userHeaderFull.avatar.avatarShape = appearance.avatarShape
-            userHeaderFull.configure(data: user, trailing: topEndView, onClicked: onClicked)
+            userHeaderFull.configure(data: user, subtitle: data.authorSubtitle, trailing: topEndView, onClicked: onClicked)
             return userHeaderFull
         } else if isQuote {
             let userHeaderQuote = resolvedUserHeaderQuote()
             userHeaderQuote.avatar.avatarShape = appearance.avatarShape
-            userHeaderQuote.configure(data: user, trailing: topEndView, onClicked: onClicked)
+            userHeaderQuote.configure(data: user, subtitle: data.authorSubtitle, trailing: topEndView, onClicked: onClicked)
             return userHeaderQuote
         } else {
             let userHeaderCompat = resolvedUserHeaderCompat()
             userHeaderCompat.avatar.avatarShape = appearance.avatarShape
-            userHeaderCompat.configure(data: user, trailing: topEndView, onClicked: onClicked)
+            userHeaderCompat.configure(data: user, subtitle: data.authorSubtitle, trailing: topEndView, onClicked: onClicked)
             return userHeaderCompat
         }
     }
@@ -797,6 +815,7 @@ final class StatusUIKitView: UIView, UIGestureRecognizerDelegate, ManualLayoutMe
             showOriginalWithTranslation: appearance.showOriginalWithTranslation
         )
         let hasCW = contentWarnings.contains { !$0.text.isEmpty }
+        let bodyTopSpacing: CGFloat = (showAsFullWidth || isQuote) && !hasCW && data.user != nil ? 2 : 0
 
         // reply-to
         if let replyToHandle = data.replyToHandle {
@@ -816,8 +835,7 @@ final class StatusUIKitView: UIView, UIGestureRecognizerDelegate, ManualLayoutMe
                     lineLimit: nil,
                     isTextSelectionEnabled: isDetail,
                     onOpenURL: openURL,
-                    preferredContentSizeCategory: appearance.preferredContentSizeCategory,
-                    contentKey: Int(data.renderHash) * 4 + contentWarning.cacheKeyOffset
+                    preferredContentSizeCategory: appearance.preferredContentSizeCategory
                 )
                 append(contentWarningText, before: 4)
             }
@@ -858,16 +876,16 @@ final class StatusUIKitView: UIView, UIGestureRecognizerDelegate, ManualLayoutMe
             }
             for content in contents where !content.text.isEmpty {
                 let bodyText = content.cacheKeyOffset == 0 ? resolvedBodyText() : resolvedBodyTranslationText()
+                bodyText.clipsToVisibleHeight = expand
                 bodyText.configure(
                     text: content.text,
                     lineLimit: bodyLineLimit,
                     isTextSelectionEnabled: bodySelectionEnabled,
                     onOpenURL: openURL,
                     preferredContentSizeCategory: appearance.preferredContentSizeCategory,
-                    contentKey: Int(data.renderHash) * 4 + 2 + content.cacheKeyOffset,
                     collapseAboveLineCount: collapseAboveLineCount
                 )
-                append(bodyText, before: visibleBodyCount == 0 ? 0 : 4)
+                append(bodyText, before: visibleBodyCount == 0 ? bodyTopSpacing : 4)
                 visibleBodyCount += 1
             }
             if contents.contains(where: { !$0.text.isEmpty }),
@@ -911,6 +929,7 @@ final class StatusUIKitView: UIView, UIGestureRecognizerDelegate, ManualLayoutMe
         if !data.images.isEmpty, showMediaInput {
             let corner: CGFloat = isQuote ? 12 : 16
             let mediaView = resolvedMediaView()
+            updateSingleMediaHeightLimit()
             mediaView.configure(
                 data: data.images,
                 sensitive: data.sensitive,
@@ -1018,7 +1037,8 @@ final class StatusUIKitView: UIView, UIGestureRecognizerDelegate, ManualLayoutMe
                 postActionLayout: appearance.postActionLayout,
                 postActionFixedWidth: appearance.postActionFixedWidth,
                 showNumbers: appearance.showNumbers,
-                isDetail: isDetail
+                isDetail: isDetail,
+                postKey: String(describing: data.statusKey)
             )
             if actionsView.hasVisibleActions {
                 let actionsContainer = resolvedActionsContainer()
@@ -1260,27 +1280,37 @@ final class StatusUIKitView: UIView, UIGestureRecognizerDelegate, ManualLayoutMe
         user.onClicked(ClickContext(launcher: makeLauncher()))
     }
 
-    private func toggleExpand() {
-        UIView.animate(withDuration: 0.25) { [weak self] in
-            guard let self = self else { return }
-            self.expand.toggle()
-            self.rebuild()
-            self.notifyLocalHeightInvalidated()
-            self.layoutIfNeeded()
-        } completion: { [weak self] _ in
-            self?.invalidateContainingCollectionLayout()
+    private func setExpanded(_ expanded: Bool) {
+        guard expand != expanded else { return }
+        layoutIfNeeded()
+        let hiddenBodyTop = contentColumnLayoutItems.first { $0.view === contentWarningToggleStorage }
+            .map { $0.view.frame.maxY + $0.spacingAfter }
+        expand = expanded
+        UIView.performWithoutAnimation {
+            rebuild()
+            if expanded {
+                let width = fittingContentColumnWidth(for: bounds.width)
+                // Lay out the full text before animating its clipped viewport.
+                for case let body as RichTextUIView in contentColumnChildren
+                    where body === bodyTextStorage || body === bodyTranslationTextStorage {
+                    if let hiddenBodyTop {
+                        body.frame = CGRect(x: bounds.width - width, y: hiddenBodyTop, width: width, height: 0)
+                    }
+                    body.prepareForFitting(width: width)
+                    body.layoutIfNeeded()
+                }
+            }
         }
-    }
 
-    private func expandOnly() {
-        UIView.animate(withDuration: 0.25) { [weak self] in
-            guard let self = self else { return }
-            self.expand = true
-            self.rebuild()
+        let cell = onLocalHeightInvalidated == nil ? nil : firstSuperview(of: UICollectionViewCell.self)
+        let timeline = cell?.firstSuperview(of: TimelineCollectionView.self)
+        UIView.animate(withDuration: UIAccessibility.isReduceMotionEnabled ? 0 : 0.25,
+                       delay: 0, options: [.beginFromCurrentState, .allowUserInteraction]) {
             self.notifyLocalHeightInvalidated()
             self.layoutIfNeeded()
+            if let cell { timeline?.layoutAfterLocalHeightChange(in: cell) }
         } completion: { [weak self] _ in
-            self?.invalidateContainingCollectionLayout()
+            if timeline == nil { self?.invalidateContainingCollectionLayout() }
         }
     }
 
@@ -1506,6 +1536,7 @@ private final class QuotesContainerView: UIView, ManualLayoutMeasurable, Timelin
         layer.cornerRadius = 16
         layer.borderWidth = 1
         layer.borderColor = UIColor.separator.cgColor
+        clipsToBounds = true
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) not supported") }
 

@@ -27,6 +27,29 @@ reveal and measured height changes to a partly hidden card while dragging or
 decelerating; the next visible card must keep its screen position.
 They also verify that fractional column widths use measured cell heights instead
 of retaining the 240pt estimate when layout and cache widths round differently.
+
+`StatusActionAnimationTests` covers action identity, UIKit animation cleanup, menu
+buttons, and count visibility. `StatusActionSwiftUIAnimationTests` captures real
+hosted frames to check first binding, state changes, rollback, and reuse, including
+retained lazy rows and post replacement during icon or digit transitions. Equal
+target counts must still cancel the previous post's transition. Animation layers
+are event driven; scrolling and first binding must not rebuild icons using `.id`.
+Direction and rebound cases inspect incoming digits before and after crossing
+their resting position. Icon checks cover Android's zero-scale entry, outgoing
+scale/fade, and visible overshoot. Opacity settles independently of the spring.
+Its Reduce Motion case runs only when the simulator's system setting is enabled; enable it on
+an isolated test simulator, restart that simulator, and run the case explicitly:
+
+```sh
+xcrun simctl spawn "$TEST_SIMULATOR" defaults write com.apple.Accessibility ReduceMotionEnabled -bool YES
+xcrun simctl shutdown "$TEST_SIMULATOR"
+xcrun simctl boot "$TEST_SIMULATOR"
+xcrun simctl bootstatus "$TEST_SIMULATOR" -b
+xcodebuild test -project appleApp/Flare.xcodeproj -scheme TimelineControllerTests \
+  -destination "platform=iOS Simulator,id=$TEST_SIMULATOR" \
+  -only-testing:TimelineControllerTests/StatusActionSwiftUIAnimationTests/testReduceMotionUpdatesImmediately
+```
+
 The fixtures yield the main actor while settling: a nested synchronous run loop
 cannot drain the controller's serialized main-queue submissions reliably.
 
@@ -42,6 +65,9 @@ The implementation has three state owners:
   Controller-local height storage retains at most two geometries per live item.
   `TimelineAutoplay` handles playback without controlling list offsets.
 
-Changing the list identity creates a fresh list at the top. Pages do not store
-reading positions for previously selected tabs or queries. The current list
-keeps its position through refreshes, loading placeholders and layout changes.
+With Home reading position enabled, the shared presenter restores the selected tab
+and an index/offset from device-local UI preferences after ordinary cache paging.
+The controller cases cover applying that bookmark, waiting for native layout before
+launch refresh, Gap insertion (including a Gap at the start of the list), and user
+scrolling taking precedence over pending restoration. UI preference restoration is
+tested in `TimelineViewportTest`; cursor transactions stay in `TimelineGapTest`.

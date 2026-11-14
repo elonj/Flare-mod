@@ -10,10 +10,8 @@ on:
       - "**.md"
       - "docs/**"
       - ".github/workflows/android.yml"
-      - ".github/workflows/desktop.yml"
-      - ".github/workflows/ios.yml"
-      - ".github/workflows/web.yml"
       - ".github/workflows/static.yml"
+      - ".github/workflows/plugin-sdk.yml"
       - ".github/workflows/crowdin-*.yml"
       - ".github/workflows/pr-quality.yml"
       - ".github/workflows/dependabot.yml"
@@ -59,10 +57,19 @@ jobs:
             "$KEY_STORE_PASSWORD" "$ALIAS" "$KEY_PASSWORD" > signing.properties
           if [ -n "$GOOGLE_SERVICES" ]; then printf '%s' "$GOOGLE_SERVICES" > app/google-services.json; fi
 
+      # versionName 从 fdroid.properties 自动读取，跟上游走：1.8.1 -> 1.8.1-mod
+      # versionCode 仍用 run_number（单调递增），保证每次都能覆盖升级
+      - name: Resolve version
+        id: ver
+        run: |
+          VN=$(sed -n 's/^versionName=//p' fdroid.properties | tr -d '\r')
+          echo "version_name=${VN}-mod" >> "$GITHUB_OUTPUT"
+          echo "检测到上游版本 ${VN} → 输出 ${VN}-mod (versionCode=${{ github.run_number }})"
+
       - name: Build release APK
         env:
           BUILD_NUMBER: ${{ github.run_number }}
-          BUILD_VERSION: '1.0.0-myclone'
+          BUILD_VERSION: ${{ steps.ver.outputs.version_name }}
         run: ./gradlew :app:assembleRelease --stacktrace
 
       - name: Show APK

@@ -33,6 +33,7 @@ struct ServiceSelectionScreen: View {
         List {
             Section {
                 header
+                    .flareTextBackground(.flareSystemGroupedBackground)
                     .listRowBackground(Color.clear)
             }
 
@@ -73,7 +74,7 @@ struct ServiceSelectionScreen: View {
                 .multilineTextAlignment(.center)
             Text(ServiceSelectCopy.welcomeMessage)
                 .font(.body)
-                .foregroundStyle(.secondary)
+                .flareSecondaryText()
                 .multilineTextAlignment(.center)
         }
         .frame(maxWidth: 520)
@@ -105,7 +106,7 @@ struct ServiceSelectionScreen: View {
                         .frame(width: 16, height: 16)
                 }
                 .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
+                .flareSecondaryText()
                 .disabled(instanceInput.isEmpty)
                 .accessibilityLabel(Text(instanceInput.isEmpty ? ServiceSelectCopy.search : ServiceSelectCopy.clear))
             }
@@ -117,9 +118,7 @@ struct ServiceSelectionScreen: View {
         ZStack {
             switch onEnum(of: state.detectedPlatformId) {
             case .success(let success):
-                Image(fontAwesome: success.data.platformIcon.fontAwesomeIcon)
-                    .resizable()
-                    .scaledToFit()
+                TabIcon(icon: success.data.platformIcon, size: 24)
                     .transition(ServiceSelectionAnimation.inline)
                     .accessibilityLabel(
                         Text(
@@ -136,7 +135,7 @@ struct ServiceSelectionScreen: View {
                     .accessibilityLabel(Text("service_select_detecting_platform"))
             case .error:
                 Image(systemName: "questionmark.circle")
-                    .foregroundStyle(.secondary)
+                    .flareSecondaryText()
                     .transition(ServiceSelectionAnimation.inline)
                     .accessibilityLabel(Text("service_select_unknown_platform"))
             }
@@ -146,70 +145,48 @@ struct ServiceSelectionScreen: View {
 
     @ViewBuilder
     private func loginContent(state: ServiceSelectState, node: NodeData) -> some View {
-        let methods = node.loginMethods
-        if let firstMethod = methods.first {
+        if !node.loginMethods.isEmpty {
             let key = "\(node.platformId)-\(node.host)"
-            let selectedMethod = selectedMethods[key] ?? firstMethod.type
             VStack(spacing: 14) {
                 platformHeader(state: state, node: node)
 
                 if node.compatibleMode {
                     Text(ServiceSelectCopy.compatibilityWarning(node.software))
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .flareSecondaryText()
                         .multilineTextAlignment(.center)
                         .transition(ServiceSelectionAnimation.inline)
                 }
 
-                if methods.count > 1 {
-                    Picker("", selection: Binding(
-                        get: { selectedMethod },
-                        set: { method in
-                            withAnimation(ServiceSelectionAnimation.standard) {
-                                selectedMethods[key] = method
-                            }
-                        }
-                    )) {
-                        ForEach(methods.indices, id: \.self) { index in
-                            Text(methods[index].title.text).tag(methods[index].type)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    .transition(ServiceSelectionAnimation.inline)
-                }
-
-                LoginFlowView {
+                LoginPanel(
+                    methods: node.loginMethods,
+                    selectedMethod: Binding(
+                        get: { selectedMethods[key] },
+                        set: { selectedMethods[key] = $0 }
+                    ),
+                    flowId: key,
+                    agreementUrl: state.agreementUrl(platformId: node.platformId, host: node.host)
+                ) { method in
                     state.createLoginHandler(
                         platformId: node.platformId,
                         host: node.host,
-                        methodType: selectedMethod,
+                        methodType: method,
                         redirectUri: nil,
                     )
                 }
-                    .id("\(key)-\(selectedMethod)")
-                    .transition(ServiceSelectionAnimation.panel)
-
-                LoginAgreementView(
-                    urlString: state.agreementUrl(platformId: node.platformId, host: node.host)
-                )
-                .transition(ServiceSelectionAnimation.inline)
             }
-            .animation(ServiceSelectionAnimation.standard, value: "\(selectedMethod)")
         }
     }
 
     private func platformHeader(state: ServiceSelectState, node: NodeData) -> some View {
         HStack(spacing: 8) {
-            Image(fontAwesome: node.platformIcon.fontAwesomeIcon)
-                .resizable()
-                .scaledToFit()
-                .frame(width: 24, height: 24)
+            TabIcon(icon: node.platformIcon, size: 24)
             VStack(alignment: .leading, spacing: 2) {
-                Text(node.platformDisplayName)
+                Text(node.platformDisplayNameText.text)
                     .font(.headline)
                 Text(node.host)
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .flareSecondaryText()
             }
             Spacer()
         }
@@ -220,8 +197,7 @@ struct ServiceSelectionScreen: View {
             data: state.instances,
             successContent: { instance in
                 ServiceInstanceRow(
-                    instance: instance,
-                    icon: instance.platformIcon.fontAwesomeIcon
+                    instance: instance
                 ) {
                     select(instance: instance, state: state)
                 }
@@ -235,7 +211,7 @@ struct ServiceSelectionScreen: View {
             emptyContent: {
                 Text(ServiceSelectCopy.emptyMessage)
                     .font(.headline)
-                    .foregroundStyle(.secondary)
+                    .flareSecondaryText()
                     .frame(maxWidth: .infinity)
                     .padding()
             }
@@ -295,12 +271,19 @@ struct ReloginScreen: View {
         List {
             Section {
                 header
+                    .flareTextBackground(.flareSystemGroupedBackground)
                     .listRowBackground(Color.clear)
             }
 
             Section {
-                loginContent(state: presenter.state)
-                    .id("\(target.accountKey)-\(selectedMethod.map { String(describing: $0) } ?? "default")")
+                LoginPanel(
+                    methods: presenter.state.methods,
+                    selectedMethod: $selectedMethod,
+                    flowId: "\(target.platformId)-\(target.accountKey)",
+                    agreementUrl: presenter.state.agreementUrl()
+                ) { method in
+                    presenter.state.createLoginHandler(methodType: method)
+                }
             }
         }
         .listStyle(.insetGrouped)
@@ -322,10 +305,7 @@ struct ReloginScreen: View {
 
     private var header: some View {
         VStack(spacing: 8) {
-            Image(fontAwesome: presenter.state.platformIcon().fontAwesomeIcon)
-                .resizable()
-                .scaledToFit()
-                .frame(width: 36, height: 36)
+            TabIcon(icon: presenter.state.platformIcon(), size: 36)
             Text(ServiceSelectCopy.loginExpired)
                 .font(.title2.weight(.semibold))
                 .multilineTextAlignment(.center)
@@ -334,24 +314,30 @@ struct ReloginScreen: View {
                 .multilineTextAlignment(.center)
             Text(ServiceSelectCopy.loginExpiredMessage)
                 .font(.caption)
-                .foregroundStyle(.secondary)
+                .flareSecondaryText()
                 .multilineTextAlignment(.center)
         }
         .frame(maxWidth: .infinity)
     }
+}
 
-    @ViewBuilder
-    private func loginContent(state: ReloginState) -> some View {
-        let methods = state.methods
+struct LoginPanel: View {
+    let methods: [LoginMethodSpec]
+    @Binding var selectedMethod: LoginMethodType?
+    let flowId: String
+    let agreementUrl: String?
+    let createLoginHandler: (LoginMethodType) -> LoginMethodHandler
+
+    var body: some View {
         if let firstMethod = methods.first {
-            let selectedMethod = selectedMethod ?? firstMethod.type
+            let method = selectedMethod ?? firstMethod.type
             VStack(spacing: 14) {
                 if methods.count > 1 {
                     Picker("", selection: Binding(
-                        get: { selectedMethod },
+                        get: { method },
                         set: { method in
                             withAnimation(ServiceSelectionAnimation.standard) {
-                                self.selectedMethod = method
+                                selectedMethod = method
                             }
                         }
                     )) {
@@ -360,15 +346,19 @@ struct ReloginScreen: View {
                         }
                     }
                     .pickerStyle(.segmented)
+                    .transition(ServiceSelectionAnimation.inline)
                 }
 
                 LoginFlowView {
-                    state.createLoginHandler(methodType: selectedMethod)
+                    createLoginHandler(method)
                 }
-                    .id("\(target.accountKey)-\(selectedMethod)")
+                    .id("\(flowId)-\(method)")
+                    .transition(ServiceSelectionAnimation.panel)
 
-                LoginAgreementView(urlString: state.agreementUrl())
+                LoginAgreementView(urlString: agreementUrl)
+                    .transition(ServiceSelectionAnimation.inline)
             }
+            .animation(ServiceSelectionAnimation.standard, value: "\(method)")
         }
     }
 }
@@ -378,7 +368,8 @@ private struct LoginFlowView: View {
 
     @State private var presenter: KotlinPresenter<LoginFlowPresenterState>
     @State private var qrContent: String?
-    @State private var webCookieUrl: String?
+    @State private var webLogin: WebLoginSession?
+    @State private var webCookieCheck = WebLoginSession.CookieCheck()
 
     init(handler: @escaping () -> LoginMethodHandler) {
         self._presenter = .init(wrappedValue: .init(presenter: LoginFlowPresenter(handler: handler())))
@@ -397,7 +388,15 @@ private struct LoginFlowView: View {
                 .transition(ServiceSelectionAnimation.inline)
             }
 
-            if let qrContent {
+            if let qr = presenter.state.flowState.qrCode {
+                if let content = qr.content {
+                    QRLoginView(content: content, qrCode: qr)
+                        .transition(ServiceSelectionAnimation.panel)
+                } else {
+                    Text(ServiceSelectCopy.pluginQRExpired)
+                        .multilineTextAlignment(.center)
+                }
+            } else if let qrContent, !presenter.state.flowState.loading, presenter.state.flowState.error == nil {
                 QRLoginView(content: qrContent)
                     .transition(ServiceSelectionAnimation.panel)
             }
@@ -405,7 +404,7 @@ private struct LoginFlowView: View {
             ForEach(presenter.state.flowState.actions, id: \.id) { action in
                 Button {
                     presenter.state.perform(actionId: action.id)
-                    if action.label == .cancel {
+                    if action.id == "cancel" {
                         withAnimation(ServiceSelectionAnimation.standard) {
                             qrContent = nil
                         }
@@ -427,27 +426,24 @@ private struct LoginFlowView: View {
             await collectEffects()
         }
         .sheet(isPresented: Binding(
-            get: { webCookieUrl != nil },
+            get: { webLogin != nil },
             set: { value in
                 if !value {
-                    webCookieUrl = nil
+                    closeWebLogin()
                 }
             }
         )) {
-            if let webCookieUrl {
+            if let webLogin {
                 if #available(iOS 26.0, *) {
-                    WebLoginScreen(onCookie: { cookie in
-                        guard presenter.state.canResume(value: cookie) else { return }
-                        presenter.state.resume(value: cookie)
-                        self.webCookieUrl = nil
-                    }, url: webCookieUrl)
+                    WebLoginScreen(session: webLogin)
                 } else {
-                    BackportWebLoginScreen(onCookie: { cookie in
-                        guard presenter.state.canResume(value: cookie) else { return }
-                        presenter.state.resume(value: cookie)
-                        self.webCookieUrl = nil
-                    }, url: webCookieUrl)
+                    BackportWebLoginScreen(session: webLogin)
                 }
+            }
+        }
+        .onChange(of: webLogin?.completed) { _, completed in
+            if completed == true {
+                closeWebLogin()
             }
         }
     }
@@ -462,9 +458,21 @@ private struct LoginFlowView: View {
                     qrContent = showQr.content
                 }
             case .openWebCookieLogin(let webCookie):
-                webCookieUrl = webCookie.url
+                // Built-in requests can repeat before the sheet appears. Plugin attempts carry probes.
+                if webCookie.probes.isEmpty, webLogin?.url == webCookie.url { continue }
+                closeWebLogin()
+                let presenter = presenter
+                webLogin = WebLoginSession(url: webCookie.url, cookieCheck: webCookieCheck) { cookies in
+                    let snapshot = loginCookieSnapshot(cookies: cookies, probes: webCookie.probes, fallbackUrl: webCookie.url)
+                    return (try? await presenter.state.checkCookies(snapshot: snapshot)) == true
+                }
             }
         }
+    }
+
+    private func closeWebLogin() {
+        webLogin?.close()
+        webLogin = nil
     }
 
     private func progressButtonLabel(title: String, isLoading: Bool) -> some View {
@@ -564,7 +572,7 @@ private struct LoginFieldView: View {
             case .displayText:
                 Text(field.value)
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .flareSecondaryText()
                     .multilineTextAlignment(.center)
             default:
                 TextField(field.label.text, text: $value)
@@ -588,37 +596,41 @@ private struct LoginFieldView: View {
 
 private struct QRLoginView: View {
     let content: String
+    var qrCode: LoginQrCode? = nil
 
     var body: some View {
         VStack(spacing: 10) {
-            Text(ServiceSelectCopy.nostrQRHint)
+            Text(qrCode.map { $0.hint?.text ?? ServiceSelectCopy.pluginQRHint } ?? ServiceSelectCopy.nostrQRHint)
                 .font(.caption)
-                .foregroundStyle(.secondary)
+                .flareSecondaryText()
                 .multilineTextAlignment(.center)
             QRCodeView(text: content)
                 .frame(width: 220, height: 220)
                 .background(.white, in: RoundedRectangle(cornerRadius: 8))
+                .accessibilityLabel(qrCode == nil ? ServiceSelectCopy.nostrQRLinkLabel : ServiceSelectCopy.pluginQRLabel)
             HStack(spacing: 8) {
                 ProgressView()
                     .controlSize(.small)
-                Text(ServiceSelectCopy.nostrQRWaiting)
+                Text(qrCode.map { $0.scanned ? ServiceSelectCopy.pluginQRScanned : ServiceSelectCopy.pluginQRWaiting }
+                    ?? ServiceSelectCopy.nostrQRWaiting)
                     .font(.caption)
             }
-            Text(ServiceSelectCopy.nostrQRLinkLabel)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Text(content)
-                .font(.caption2)
-                .textSelection(.enabled)
-                .multilineTextAlignment(.center)
-                .lineLimit(4)
+            if qrCode == nil {
+                Text(ServiceSelectCopy.nostrQRLinkLabel)
+                    .font(.caption)
+                    .flareSecondaryText()
+                Text(content)
+                    .font(.caption2)
+                    .textSelection(.enabled)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(4)
+            }
         }
     }
 }
 
 private struct ServiceInstanceRow: View {
     let instance: UiInstance
-    let icon: FontAwesomeIcon
     let onSelect: () -> Void
 
     var body: some View {
@@ -644,13 +656,11 @@ private struct ServiceInstanceRow: View {
     @ViewBuilder
     private var instanceIcon: some View {
         if let iconUrl = instance.iconUrl, !iconUrl.isEmpty {
-            NetworkImage(data: iconUrl)
+            NetworkImage(data: UiMediaImage(url: iconUrl, proxy: ProxyRef.Global.shared))
                 .frame(maxWidth: 32)
                 .clipShape(RoundedRectangle(cornerRadius: 4))
         } else {
-            Image(fontAwesome: icon)
-                .resizable()
-                .scaledToFit()
+            TabIcon(icon: instance.platformIcon, size: 32)
         }
     }
 }
@@ -694,7 +704,7 @@ private struct LoginAgreementView: View {
         if let urlString, let url = URL(string: urlString) {
             Text(agreement(url: url))
                 .font(.caption)
-                .foregroundStyle(.secondary)
+                .flareSecondaryText()
                 .multilineTextAlignment(.center)
         }
     }
@@ -719,6 +729,11 @@ private enum ServiceSelectCopy {
     static let nostrQRHint = String(localized: "nostr_login_qr_hint", defaultValue: "Scan with Amber, Alby, or another Nostr Connect signer.")
     static let nostrQRWaiting = String(localized: "nostr_login_qr_waiting", defaultValue: "Waiting for signer approval...")
     static let nostrQRLinkLabel = String(localized: "nostr_login_qr_link_label", defaultValue: "Nostr Connect link")
+    static let pluginQRHint = localizedPresentationString("plugin_login_qr_hint", fallback: "Scan this code with your phone.")
+    static let pluginQRLabel = localizedPresentationString("plugin_login_qr_label", fallback: "Sign-in QR code")
+    static let pluginQRWaiting = localizedPresentationString("plugin_login_qr_waiting", fallback: "Waiting for you to scan…")
+    static let pluginQRScanned = localizedPresentationString("plugin_login_qr_scanned", fallback: "Confirm sign-in on your phone.")
+    static let pluginQRExpired = localizedPresentationString("plugin_login_qr_expired", fallback: "This QR code has expired.")
     static let eulaPrivacyPolicy = String(localized: "eula_privacy_policy", defaultValue: "EULA and Privacy Policy")
     static let loginAgreementPrefix = String(localized: "login_agreement_prefix", defaultValue: "By logging in, you agree to the ")
     static let loginExpired = String(localized: "login_expired", defaultValue: "Login session expired")

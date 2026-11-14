@@ -23,12 +23,15 @@ import dev.dimension.flare.data.network.xqt.model.UserLegacy
 import dev.dimension.flare.data.network.xqt.model.UserResultCore
 import dev.dimension.flare.data.network.xqt.model.UserResults
 import dev.dimension.flare.data.network.xqt.model.XqtUrl
+import dev.dimension.flare.model.AccountType
 import dev.dimension.flare.model.MicroBlogKey
+import dev.dimension.flare.ui.model.UiHandle
 import dev.dimension.flare.ui.model.UiMedia
 import dev.dimension.flare.ui.model.UiTimelineV2
 import dev.dimension.flare.ui.model.postEventOrNull
 import dev.dimension.flare.ui.render.RenderContent
 import dev.dimension.flare.ui.render.RenderRun
+import dev.dimension.flare.ui.route.DeeplinkRoute
 import org.koin.core.context.startKoin
 import org.koin.core.context.stopKoin
 import org.koin.plugin.module.dsl.modules
@@ -55,6 +58,32 @@ class XQTRenderTest {
     }
 
     @Test
+    fun profileMentionsUseBareUserNames() {
+        listOf('@', '＠').forEach { prefix ->
+            val user = createUser("profile-user", "momizibotanE")
+            val description = "サブ${prefix}momizibotansab"
+            val profile = user.copy(legacy = user.legacy.copy(description = description)).render(accountKey)
+            val mention =
+                assertNotNull(profile.description)
+                    .renderRuns
+                    .filterIsInstance<RenderContent.Text>()
+                    .flatMap { it.runs }
+                    .filterIsInstance<RenderRun.Text>()
+                    .single { it.style.link != null }
+            val route =
+                assertIs<DeeplinkRoute.Profile.UserNameWithHost>(
+                    DeeplinkRoute.parse(assertNotNull(mention.style.link)),
+                )
+
+            assertEquals("${prefix}momizibotansab", mention.text)
+            assertEquals("momizibotansab", route.userName)
+            assertEquals(accountKey.host, route.host)
+            assertEquals(AccountType.Specific(accountKey), route.accountType)
+            assertEquals("momizibotansab", UiHandle(route.userName, route.host).normalizedRaw)
+        }
+    }
+
+    @Test
     fun mediaIsRecognized() {
         val status =
             createTweet(
@@ -65,11 +94,13 @@ class XQTRenderTest {
                     listOf(
                         createPhotoMedia("img-1", "https://pbs.twimg.com/media/image.jpg", 1200, 800),
                         createVideoMedia("vid-1", "https://pbs.twimg.com/media/video.jpg", "https://video.twimg.com/video.mp4", 1920, 1080),
+                        createVideoMedia("gif-1", "https://pbs.twimg.com/media/gif.jpg", "https://video.twimg.com/gif.mp4", 640, 480)
+                            .copy(type = Media.Type.animatedGif),
                     ),
             )
 
         val rendered = rootPostOf(status.render(accountKey))
-        assertEquals(2, rendered.images.size)
+        assertEquals(3, rendered.images.size)
 
         val image = assertIs<UiMedia.Image>(rendered.images[0])
         assertEquals("https://pbs.twimg.com/media/image.jpg?name=orig", image.url)
@@ -78,6 +109,8 @@ class XQTRenderTest {
         assertEquals(800f, image.height)
 
         val video = assertIs<UiMedia.Video>(rendered.images[1])
+        assertEquals(UiMedia.Video.Kind.Video, video.kind)
+        assertEquals(UiMedia.Video.Kind.Gif, assertIs<UiMedia.Video>(rendered.images[2]).kind)
         assertEquals("https://video.twimg.com/video.mp4", video.url)
         assertEquals("https://pbs.twimg.com/media/video.jpg", video.thumbnailUrl)
         assertEquals(1920f, video.width)

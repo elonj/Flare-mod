@@ -6,7 +6,6 @@ import SwiftUI
 public struct DiscoverContentScreen<AskAiOverlay: View>: View {
     @Environment(\.timelineListRenderer) private var listRenderer
     @State private var listScope = UUID().uuidString
-    @Environment(\.openURL) private var openURL
     @Environment(\.timelineAppearance.aiConfig.agent) private var agentEnabled
     @State private var presenter: KotlinPresenter<DiscoverState>
     @State private var searchPresenter: KotlinPresenter<SearchState>
@@ -36,6 +35,20 @@ public struct DiscoverContentScreen<AskAiOverlay: View>: View {
     public var body: some View {
         scrollingContent
         .modifier(DiscoverListStyle())
+        .overlay {
+            if searchPresenter.state.searching {
+                if searchPresenter.state.isSearchUnavailable || searchPresenter.state.hasNoResults {
+                    ListEmptyView(
+                        searchPresenter.state.isSearchUnavailable ? "search_unavailable_title" : "search_empty_title",
+                        icon: .magnifyingGlass
+                    )
+                    .allowsHitTesting(false)
+                }
+            } else if presenter.state.hasNoRecommendations {
+                ListEmptyView("discover_empty_title", icon: .globe)
+                    .allowsHitTesting(false)
+            }
+        }
         .refreshable {
             if searchPresenter.state.searching {
                 try? await searchPresenter.state.refreshSuspend()
@@ -94,15 +107,13 @@ public struct DiscoverContentScreen<AskAiOverlay: View>: View {
                 }
             }
         }
-        .onChange(of: presenter.state.selectedAccount?.key) { _, _ in
+        .onChange(of: presenter.state.selectedAccountKey, initial: true) { _, _ in
             listScope = UUID().uuidString
-            if listRenderer != nil {
-                search(query: committedSearchText)
-            }
+            search(query: committedSearchText)
         }
-        .onChange(of: presenter.state.selectedAccount) { _, newAccount in
-            if listRenderer == nil, let newAccount {
-                searchPresenter.state.setAccount(profile: newAccount)
+        .onChange(of: presenter.state.isAccountReady) { _, ready in
+            if ready && presenter.state.selectedAccountKey == nil {
+                search(query: committedSearchText)
             }
         }
     }
@@ -130,15 +141,36 @@ public struct DiscoverContentScreen<AskAiOverlay: View>: View {
         if case .success(let data) = onEnum(of: users) {
             headers.append(.title(searching ? "local_history_user" : "discover_users"))
             headers.append(TimelineListHeader(id: "users") { TimelineListUserStrip(users: data) })
-        }
-        if !searching, case .success(let tags) = onEnum(of: presenter.state.hashtags) {
-            headers.append(.title("discover_tags"))
-            headers.append(TimelineListHeader(id: "tags") {
-                DiscoverHashtagSection(hashtagsState: tags, onSelect: commitSearch).content
-                    .padding(.horizontal, 16)
+        } else if case .error(let error) = onEnum(of: users) {
+            headers.append(TimelineListHeader(id: "users-error") {
+                ListErrorView(error: error.error) { _ = error.onRetry() }
             })
+        } else if case .loading = onEnum(of: users) {
+            headers.append(TimelineListHeader(id: "users-loading") { SearchSectionProgress() })
         }
-        let showsPosts = !posts.isEmpty && !posts.isError
+        if !searching {
+            switch onEnum(of: presenter.state.hashtags) {
+            case .success(let tags):
+                headers.append(.title("discover_tags"))
+                headers.append(TimelineListHeader(id: "tags") {
+                    DiscoverHashtagSection(
+                        hashtagsState: tags,
+                        canSearchPosts: presenter.state.canSearchPosts,
+                        onSelect: commitSearch
+                    ).content
+                        .padding(.horizontal, 16)
+                })
+            case .error(let error):
+                headers.append(TimelineListHeader(id: "tags-error") {
+                    ListErrorView(error: error.error) { _ = error.onRetry() }
+                })
+            case .loading:
+                headers.append(TimelineListHeader(id: "tags-loading") { SearchSectionProgress() })
+            case .empty:
+                break
+            }
+        }
+        let showsPosts = !posts.isEmpty
         if showsPosts { headers.append(.title(searching ? "local_history_status" : "discover_status")) }
         return TimelineListRequest(
             key: "\(listScope):\(searching ? searchPresenter.key : "discover")",
@@ -152,25 +184,22 @@ public struct DiscoverContentScreen<AskAiOverlay: View>: View {
     private var accountToolbarItem: some ToolbarContent {
         if case .success(let data) = onEnum(of: presenter.state.accounts) {
             let accounts = data.data
-            if accounts.count > 1 {
+            if presenter.state.canSwitchAccount {
                 ToolbarItem(placement: .primaryAction) {
                     Menu {
                         ForEach(0..<accounts.count, id: \.self) { index in
                             let account = accounts[index] as! UiProfile
                             Toggle(isOn: Binding(get: {
-                                presenter.state.selectedAccount?.key == account.key
+                                presenter.state.selectedAccountKey == account.key
                             }, set: { value in
                                 if value {
-                                    presenter.state.setAccount(profile: account)
-                                    if listRenderer == nil {
-                                        searchPresenter.state.setAccount(profile: account)
-                                    }
+                                    selectAccount(account)
                                 }
                             })) {
                                 Label {
-                                    Text(account.handle.canonical)
+                                    Text(account.handle.display)
                                 } icon: {
-                                    AvatarView(data: account.avatar?.url, customHeader: account.avatar?.customHeaders)
+                                    AvatarView(data: account.avatar)
                                 }
                             }
                         }
@@ -178,14 +207,13 @@ public struct DiscoverContentScreen<AskAiOverlay: View>: View {
                         if let selectedAccount = presenter.state.selectedAccount {
                             HStack(spacing: 8) {
                                 AvatarView(
-                                    data: selectedAccount.avatar?.url,
-                                    customHeader: selectedAccount.avatar?.customHeaders
+                                    data: selectedAccount.avatar
                                 )
                                 .frame(width: 24, height: 24)
-                                Text(selectedAccount.handle.canonical)
+                                Text(selectedAccount.handle.display)
                                 Image(fontAwesome: .chevronDown)
                                     .font(.footnote)
-                                    .foregroundStyle(.secondary)
+                                    .flareSecondaryText()
                                     .scaledToFit()
                                     .frame(width: 8, height: 8)
                                     .padding(8)
@@ -194,6 +222,12 @@ public struct DiscoverContentScreen<AskAiOverlay: View>: View {
                                             .fill(Color.secondary.opacity(0.2))
                                     )
                                     .scaleEffect(0.66)
+                            }
+                        } else {
+                            Label {
+                                Text("discover_title", bundle: FlareAppleUILocalization.bundle)
+                            } icon: {
+                                Image(systemName: "person.crop.circle")
                             }
                         }
                     }
@@ -220,23 +254,30 @@ public struct DiscoverContentScreen<AskAiOverlay: View>: View {
             let accounts: [UiProfile] = (0..<rawAccounts.count).compactMap { index in
                 rawAccounts[index] as? UiProfile
             }
-            if !accounts.isEmpty, let toolbarAccount = presenter.state.selectedAccount ?? accounts.first {
+            if !accounts.isEmpty {
                 ToolbarItem(placement: .primaryAction) {
                     Button {
                         isMacAccountPopoverPresented.toggle()
                     } label: {
-                        AvatarView(
-                            data: toolbarAccount.avatar?.url,
-                            customHeader: toolbarAccount.avatar?.customHeaders
-                        )
-                        .frame(width: 26, height: 26)
+                        if let toolbarAccount = presenter.state.selectedAccount {
+                            AvatarView(
+                                data: toolbarAccount.avatar
+                            )
+                            .frame(width: 26, height: 26)
+                        } else {
+                            Label {
+                                Text("discover_title", bundle: FlareAppleUILocalization.bundle)
+                            } icon: {
+                                Image(systemName: "person.crop.circle")
+                            }
+                        }
                     }
                     .buttonStyle(.plain)
-                    .help(toolbarAccount.handle.canonical)
+                    .help(presenter.state.selectedAccount?.handle.display ?? String(localized: "discover_title", bundle: FlareAppleUILocalization.bundle))
                     .popover(isPresented: $isMacAccountPopoverPresented, arrowEdge: .top) {
                         MacDiscoverAccountPopover(
                             accounts: accounts,
-                            selectedAccount: presenter.state.selectedAccount,
+                            selectedAccountKey: presenter.state.selectedAccountKey,
                             onSelect: selectAccount
                         )
                     }
@@ -251,12 +292,15 @@ public struct DiscoverContentScreen<AskAiOverlay: View>: View {
         if case .success(let usersState) = onEnum(of: searchPresenter.state.users) {
             DiscoverUserSection(
                 titleKey: "local_history_user",
-                usersState: usersState,
-                openURL: openURL
+                usersState: usersState
             )
+        } else if case .error(let error) = onEnum(of: searchPresenter.state.users) {
+            ListErrorView(error: error.error) { _ = error.onRetry() }
+        } else if case .loading = onEnum(of: searchPresenter.state.users) {
+            SearchSectionProgress()
         }
 
-        if !searchPresenter.state.status.isEmpty && !searchPresenter.state.status.isError {
+        if !searchPresenter.state.status.isEmpty {
             DiscoverTimelineSection(
                 titleKey: "local_history_status",
                 data: searchPresenter.state.status
@@ -269,19 +313,27 @@ public struct DiscoverContentScreen<AskAiOverlay: View>: View {
         if case .success(let usersState) = onEnum(of: presenter.state.users) {
             DiscoverUserSection(
                 titleKey: "discover_users",
-                usersState: usersState,
-                openURL: openURL
+                usersState: usersState
             )
+        } else if case .error(let error) = onEnum(of: presenter.state.users) {
+            ListErrorView(error: error.error) { _ = error.onRetry() }
+        } else if case .loading = onEnum(of: presenter.state.users) {
+            SearchSectionProgress()
         }
 
         if case .success(let tagState) = onEnum(of: presenter.state.hashtags) {
             DiscoverHashtagSection(
                 hashtagsState: tagState,
+                canSearchPosts: presenter.state.canSearchPosts,
                 onSelect: commitSearch
             )
+        } else if case .error(let error) = onEnum(of: presenter.state.hashtags) {
+            ListErrorView(error: error.error) { _ = error.onRetry() }
+        } else if case .loading = onEnum(of: presenter.state.hashtags) {
+            SearchSectionProgress()
         }
 
-        if !presenter.state.status.isEmpty && !presenter.state.status.isError {
+        if !presenter.state.status.isEmpty {
             DiscoverTimelineSection(
                 titleKey: "discover_status",
                 data: presenter.state.status
@@ -313,14 +365,11 @@ public struct DiscoverContentScreen<AskAiOverlay: View>: View {
     }
 
     private func search(query: String) {
-        guard listRenderer != nil else {
-            searchPresenter.state.search(query: query)
-            return
-        }
-        let accountType = presenter.state.selectedAccount.map {
-            AccountType.Specific(accountKey: $0.key)
-        } ?? presenter.state.selectedAccountType
-        searchPresenter = KotlinPresenter(presenter: SearchPresenter(accountType: accountType, initialQuery: query))
+        presenter.state.setSearchActive(active: !query.isEmpty)
+        guard presenter.state.isAccountReady else { return }
+        searchPresenter = KotlinPresenter(
+            presenter: SearchPresenter(accountType: presenter.state.selectedAccountType, initialQuery: query)
+        )
     }
 
     private func askAi() {
@@ -331,7 +380,6 @@ public struct DiscoverContentScreen<AskAiOverlay: View>: View {
 
     private func selectAccount(_ account: UiProfile) {
         presenter.state.setAccount(profile: account)
-        searchPresenter.state.setAccount(profile: account)
         #if os(macOS)
         isMacAccountPopoverPresented = false
         #endif
@@ -352,7 +400,7 @@ public extension DiscoverContentScreen where AskAiOverlay == EmptyView {
 #if os(macOS)
 private struct MacDiscoverAccountPopover: View {
     let accounts: [UiProfile]
-    let selectedAccount: UiProfile?
+    let selectedAccountKey: MicroBlogKey?
     let onSelect: (UiProfile) -> Void
 
     var body: some View {
@@ -361,7 +409,7 @@ private struct MacDiscoverAccountPopover: View {
                 let account = accounts[index]
                 MacDiscoverAccountRow(
                     account: account,
-                    isSelected: selectedAccount?.key == account.key,
+                    isSelected: selectedAccountKey == account.key,
                     action: {
                         onSelect(account)
                     }
@@ -385,10 +433,10 @@ private struct MacDiscoverAccountRow: View {
                     .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
                     .frame(width: 18)
 
-                AvatarView(data: account.avatar?.url, customHeader: account.avatar?.customHeaders)
+                AvatarView(data: account.avatar)
                     .frame(width: 28, height: 28)
 
-                Text(account.handle.canonical)
+                Text(account.handle.display)
                     .lineLimit(1)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -408,7 +456,6 @@ private struct MacDiscoverAccountRow: View {
 private struct DiscoverUserSection: View {
     let titleKey: String
     let usersState: PagingStateSuccess<UiProfile>
-    let openURL: OpenURLAction
 
     var body: some View {
         Section {
@@ -417,18 +464,11 @@ private struct DiscoverUserSection: View {
                     ForEach(0..<Int(usersState.itemCount), id: \.self) { index in
                         ListCardView {
                             if let item = usersState.peek(index: Int32(index)) {
-                                UserCompatView(data: item)
+                                SearchResultProfileView(user: item)
                                     .onAppear {
                                         _ = usersState.get(index: Int32(index))
                                     }
                                     .padding()
-                                    .onTapGesture {
-                                        item.onClicked(
-                                            ClickContext(
-                                                launcher: AppleUriLauncher(openUrl: openURL)
-                                            )
-                                        )
-                                    }
                             } else {
                                 UserLoadingView()
                                     .padding()
@@ -448,6 +488,7 @@ private struct DiscoverUserSection: View {
 
 private struct DiscoverHashtagSection: View {
     let hashtagsState: PagingStateSuccess<UiHashtag>
+    let canSearchPosts: Bool
     let onSelect: (String) -> Void
 
     var body: some View {
@@ -464,7 +505,7 @@ private struct DiscoverHashtagSection: View {
             ForEach(0..<Int(hashtagsState.itemCount), id: \.self) { index in
                 if let item = hashtagsState.peek(index: Int32(index)) {
                     Button {
-                        onSelect(item.hashtag)
+                        onSelect(item.searchContent)
                     } label: {
                         Text(item.hashtag)
                             .lineLimit(1)
@@ -472,6 +513,7 @@ private struct DiscoverHashtagSection: View {
                             .padding(.vertical, 8)
                     }
                     .buttonStyle(.plain)
+                    .disabled(!canSearchPosts)
                     .background(
                         Color.flareSecondarySystemGroupedBackground,
                         in: RoundedRectangle(cornerRadius: 8, style: .continuous)
@@ -501,7 +543,11 @@ private struct DiscoverTimelineSection: View {
 
     var body: some View {
         Section {
+            #if os(iOS)
+            TimelinePagingListContent(data: data)
+            #else
             TimelinePagingListContent(data: data, usesDefaultHorizontalPadding: true)
+            #endif
         } header: {
             Text(FlareAppleUILocalization.string(titleKey))
         }
@@ -515,6 +561,7 @@ private struct DiscoverListStyle: ViewModifier {
         content
             .scrollContentBackground(.hidden)
             .listRowSpacing(2)
+            .flareTextBackground(.flareSystemBackground)
             .listStyle(.plain)
         #else
         content
@@ -530,6 +577,7 @@ private struct DiscoverSectionRowStyle: ViewModifier {
             .listRowSeparator(.hidden)
             .padding(.horizontal)
             .listRowInsets(.init(top: 0, leading: 0, bottom: 0, trailing: 0))
+            .flareTextBackground(.flareSystemGroupedBackground)
             .listRowBackground(Color.clear)
     }
 }

@@ -33,13 +33,14 @@ kotlin {
                 implementation(dependencies.platform(libs.compose.bom))
                 implementation(libs.compose.runtime)
                 implementation(libs.bundles.kotlinx)
+                implementation(libs.kotlin.codepoints.deluxe)
                 implementation(dependencies.platform(libs.koin.bom))
                 implementation(libs.koin.core)
                 implementation(libs.koin.annotations)
                 implementation(libs.bundles.ktor)
                 implementation(libs.ktor.client.resources)
                 implementation(libs.cryptography.provider.optimal)
-                implementation(libs.nostr.sdk.kmp)
+                implementation(libs.quartz)
                 implementation(libs.paging.common)
             }
         }

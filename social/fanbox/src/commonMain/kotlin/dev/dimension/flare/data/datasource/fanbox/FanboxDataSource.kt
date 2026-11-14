@@ -4,6 +4,7 @@ import dev.dimension.flare.data.datasource.microblog.AuthenticatedMicroblogDataS
 import dev.dimension.flare.data.datasource.microblog.DatabaseUpdater
 import dev.dimension.flare.data.datasource.microblog.PostEvent
 import dev.dimension.flare.data.datasource.microblog.ProfileTab
+import dev.dimension.flare.data.datasource.microblog.SearchOperation
 import dev.dimension.flare.data.datasource.microblog.datasource.ArticleDataSource
 import dev.dimension.flare.data.datasource.microblog.datasource.PinnableTimelineTabDataSource
 import dev.dimension.flare.data.datasource.microblog.datasource.PinnableTimelineTabSection
@@ -17,8 +18,10 @@ import dev.dimension.flare.data.datasource.microblog.handler.RelationHandler
 import dev.dimension.flare.data.datasource.microblog.handler.UserHandler
 import dev.dimension.flare.data.datasource.microblog.loader.RelationActionType
 import dev.dimension.flare.data.datasource.microblog.paging.RemoteLoader
+import dev.dimension.flare.data.datasource.microblog.paging.ShareRepliesLoader
 import dev.dimension.flare.data.datasource.microblog.paging.notSupported
 import dev.dimension.flare.data.model.IconType
+import dev.dimension.flare.data.model.ProxyRef
 import dev.dimension.flare.data.model.tab.ShortcutSpec
 import dev.dimension.flare.data.model.tab.TimelineCandidate
 import dev.dimension.flare.data.model.tab.TimelineSpec
@@ -56,6 +59,7 @@ internal class FanboxDataSource(
     PostEventHandler.Handler {
     private val service =
         FanboxService(
+            proxy = ProxyRef.forAccount(accountKey),
             credentialFlow = credentialFlow,
             onCredentialRefreshed = updateCredential,
         )
@@ -68,6 +72,7 @@ internal class FanboxDataSource(
 
     override val userHandler by lazy {
         UserHandler(
+            proxy = ProxyRef.forAccount(accountKey),
             host = accountKey.host,
             loader = loader,
         )
@@ -177,12 +182,17 @@ internal class FanboxDataSource(
             creatorKey = userKey,
         )
 
+    override fun shareReplies(statusKey: MicroBlogKey): RemoteLoader<UiTimelineV2> =
+        ShareRepliesLoader(articleComments(statusKey), statusKey, comments = true)
+
     override fun context(statusKey: MicroBlogKey): RemoteLoader<UiTimelineV2> =
         FanboxStatusDetailLoader(
             service = service,
             accountKey = accountKey,
             statusKey = statusKey,
         )
+
+    override val searchOperations: Set<SearchOperation> = SearchOperation.entries.toSet() - SearchOperation.DiscoverHashtags
 
     override fun searchStatus(query: String): RemoteLoader<UiTimelineV2> =
         FanboxSearchTimelineLoader(

@@ -15,6 +15,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.PointerIcon
 import androidx.compose.ui.input.pointer.pointerHoverIcon
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import dev.dimension.flare.compose.ui.Res
@@ -23,6 +24,8 @@ import dev.dimension.flare.model.MicroBlogKey
 import dev.dimension.flare.ui.component.AvatarComponent
 import dev.dimension.flare.ui.component.RichText
 import dev.dimension.flare.ui.component.platform.PlatformText
+import dev.dimension.flare.ui.model.ClickContext
+import dev.dimension.flare.ui.model.ClickEvent
 import dev.dimension.flare.ui.model.UiProfile
 import dev.dimension.flare.ui.theme.PlatformTheme
 import org.jetbrains.compose.resources.stringResource
@@ -30,26 +33,28 @@ import org.jetbrains.compose.resources.stringResource
 @Composable
 public fun CommonStatusHeaderComponent(
     data: UiProfile,
-    onUserClick: (MicroBlogKey) -> Unit,
+    onUserClick: ((MicroBlogKey) -> Unit)? = profileClick(data),
     modifier: Modifier = Modifier,
     avatarModifier: Modifier = Modifier,
     nameModifier: Modifier = Modifier,
     handleModifier: Modifier = Modifier,
+    subtitle: String = data.handle.display,
     leadingContent: @Composable (RowScope.() -> Unit)? = {
         Box(avatarModifier, propagateMinConstraints = true) {
             AvatarComponent(
                 data = data.avatar,
                 contentDescription =
-                    stringResource(
-                        Res.string.profile_open_user,
-                        data.handle.canonical,
-                    ),
+                    if (onUserClick != null) {
+                        stringResource(Res.string.profile_open_user, data.handle.display)
+                    } else {
+                        null
+                    },
                 modifier =
-                    Modifier
-                        .pointerHoverIcon(PointerIcon.Hand)
-                        .clickable {
-                            onUserClick(data.key)
-                        },
+                    if (onUserClick == null) {
+                        Modifier
+                    } else {
+                        Modifier.pointerHoverIcon(PointerIcon.Hand).clickable { onUserClick(data.key) }
+                    },
             )
         }
     },
@@ -61,32 +66,18 @@ public fun CommonStatusHeaderComponent(
             RichText(
                 text = data.name,
                 modifier =
-                    nameModifier
-                        .pointerHoverIcon(PointerIcon.Hand)
-                        .clickable(
-                            interactionSource = remember { MutableInteractionSource() },
-                            indication = null,
-                        ) {
-                            onUserClick(data.key)
-                        },
+                    nameModifier.profileTextClick(data.key, onUserClick),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
         },
         supportingContent = {
             PlatformText(
-                text = data.handle.canonical,
+                text = subtitle,
                 style = PlatformTheme.typography.caption,
                 color = PlatformTheme.colorScheme.caption,
                 modifier =
-                    handleModifier
-                        .pointerHoverIcon(PointerIcon.Hand)
-                        .clickable(
-                            interactionSource = remember { MutableInteractionSource() },
-                            indication = null,
-                        ) {
-                            onUserClick(data.key)
-                        },
+                    handleModifier.profileTextClick(data.key, onUserClick),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -95,6 +86,29 @@ public fun CommonStatusHeaderComponent(
         modifier = modifier,
     )
 }
+
+@Composable
+private fun profileClick(data: UiProfile): ((MicroBlogKey) -> Unit)? {
+    if (data.clickEvent == ClickEvent.Noop) return null
+    val uriHandler = LocalUriHandler.current
+    return { data.onClicked(ClickContext(launcher = uriHandler::openUri)) }
+}
+
+@Composable
+private fun Modifier.profileTextClick(
+    key: MicroBlogKey,
+    onClick: ((MicroBlogKey) -> Unit)?,
+): Modifier =
+    if (onClick == null) {
+        this
+    } else {
+        pointerHoverIcon(PointerIcon.Hand).clickable(
+            interactionSource = remember { MutableInteractionSource() },
+            indication = null,
+        ) {
+            onClick(key)
+        }
+    }
 
 @Composable
 public fun ListComponent(

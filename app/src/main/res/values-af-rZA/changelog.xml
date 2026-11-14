@@ -3,11 +3,10 @@
     <string name="changelog_current"><![CDATA[
             <span>Weergawe %1$s:</span>
             <ul>
-                <li>Pixiv Ugoira-animasies kan nou gespeel en as MP4-video\'s gestoor word.</li>
-                <li>Sleep op in die mediakyker om plasingsbesonderhede en aksies te sien.</li>
-                <li>Bluesky ondersteun nou GIF- en MOV-oplaaie. Videostoor is reggestel en die tuistydlyn versteek antwoorde aan rekeninge wat jy nie volg nie.</li>
-                <li>Mediaoplaaie en herprobeer van konsepte is verbeter.</li>
-                <li>Foutregstellings en werkverrigtingverbeterings.</li>
+                <li>Video’s onthou jou afspeelspoed, met nuwe opsies tot 16×.</li>
+                <li>Wissel tussen die oorspronklike en vertaalde teks in artikels, RSS-inskrywings en galerybesonderhede.</li>
+                <li>Soek en Ontdek wys net afdelings wat die gekose rekening ondersteun.</li>
+                <li>Sommige probleme met webaanmelding is reggestel.</li>
             </ul>
         ]]></string>
     <string name="changelog_title">Welkom terug!</string>

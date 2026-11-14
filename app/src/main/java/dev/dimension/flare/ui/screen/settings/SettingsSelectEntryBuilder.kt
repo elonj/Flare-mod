@@ -12,19 +12,24 @@ import kotlin.time.Clock
 @OptIn(ExperimentalMaterial3AdaptiveApi::class)
 internal fun EntryProviderScope<NavKey>.settingsSelectEntryBuilder(
     navigate: (Route) -> Unit,
-    onBack: () -> Unit
+    onBack: () -> Unit,
 ) {
     entry<Route.Settings.Main>(
-        metadata = ListDetailSceneStrategy.listPane(
-            sceneKey = "Settings",
-            detailPlaceholder = {
-                SettingsDetailPlaceholder()
-            }
-        )
+        metadata =
+            ListDetailSceneStrategy.listPane(
+                sceneKey = "Settings",
+                detailPlaceholder = {
+                    SettingsDetailPlaceholder()
+                },
+            ),
     ) {
         SettingsScreen(
+            toProxy = { navigate(Route.Settings.Proxy) },
             toAccounts = {
                 navigate(Route.Settings.Accounts)
+            },
+            toPlugins = {
+                navigate(Route.Settings.Plugins)
             },
             toAppearanceTheme = {
                 navigate(Route.Settings.AppearanceTheme)
@@ -63,10 +68,17 @@ internal fun EntryProviderScope<NavKey>.settingsSelectEntryBuilder(
         )
     }
 
+    entry<Route.Settings.Proxy>(
+        metadata = ListDetailSceneStrategy.detailPane(sceneKey = "Settings"),
+    ) {
+        ProxySettingsScreen(onBack = onBack)
+    }
+
     entry<Route.Settings.Accounts>(
-        metadata = ListDetailSceneStrategy.detailPane(
-            sceneKey = "Settings"
-        )
+        metadata =
+            ListDetailSceneStrategy.detailPane(
+                sceneKey = "Settings",
+            ),
     ) {
         AccountsScreen(
             onBack = onBack,
@@ -78,70 +90,116 @@ internal fun EntryProviderScope<NavKey>.settingsSelectEntryBuilder(
             },
             toNostrRelays = {
                 navigate(Route.Settings.NostrRelays(it))
-            }
+            },
+            toPlugins = {
+                navigate(Route.Settings.Plugins)
+            },
+        )
+    }
+
+    entry<Route.Settings.Plugins>(
+        metadata = ListDetailSceneStrategy.detailPane(sceneKey = "Settings"),
+    ) {
+        AndroidPluginManagementScreen(
+            onBack = onBack,
+            onSettings = { navigate(Route.Settings.PluginSettings(it)) },
+            onExtensions = { navigate(Route.Settings.PluginExtensions(it)) },
+            onOpenMarketplace = { navigate(Route.Settings.PluginMarketplace) },
+            onCreateWithAI = {
+                navigate(Route.AgentChat("generic-chat:${Clock.System.now().toEpochMilliseconds()}", null))
+            },
+        )
+    }
+
+    entry<Route.Settings.PluginExtensions>(
+        metadata = ListDetailSceneStrategy.detailPane(sceneKey = "Settings"),
+    ) {
+        PluginExtensionScreen(pluginId = it.pluginId, onBack = onBack, onLogin = { navigate(Route.ServiceSelect.Selection) })
+    }
+
+    entry<Route.Settings.PluginSettings>(
+        metadata = ListDetailSceneStrategy.detailPane(sceneKey = "Settings"),
+    ) {
+        PluginSettingsScreen(pluginId = it.pluginId, onBack = onBack)
+    }
+
+    entry<Route.Settings.PluginMarketplace>(
+        metadata = ListDetailSceneStrategy.detailPane(sceneKey = "Settings"),
+    ) {
+        AndroidPluginManagementScreen(
+            onBack = onBack,
+            onSettings = { navigate(Route.Settings.PluginSettings(it)) },
+            onExtensions = { navigate(Route.Settings.PluginExtensions(it)) },
+            marketplace = true,
         )
     }
 
     entry<Route.Settings.AppearanceTheme>(
-        metadata = ListDetailSceneStrategy.detailPane(
-            sceneKey = "Settings"
-        )
+        metadata =
+            ListDetailSceneStrategy.detailPane(
+                sceneKey = "Settings",
+            ),
     ) {
         AppearanceThemeScreen(
             onBack = onBack,
             toColorPicker = {
                 navigate(Route.Settings.ColorPicker)
-            }
+            },
         )
     }
 
     entry<Route.Settings.AppearanceLayout>(
-        metadata = ListDetailSceneStrategy.detailPane(
-            sceneKey = "Settings"
-        )
+        metadata =
+            ListDetailSceneStrategy.detailPane(
+                sceneKey = "Settings",
+            ),
     ) {
         AppearanceLayoutScreen(
             onBack = onBack,
             toPostActionLayout = {
                 navigate(Route.Settings.PostActionLayout)
-            }
+            },
         )
     }
 
     entry<Route.Settings.PostActionLayout>(
-        metadata = ListDetailSceneStrategy.detailPane(
-            sceneKey = "Settings"
-        )
+        metadata =
+            ListDetailSceneStrategy.detailPane(
+                sceneKey = "Settings",
+            ),
     ) {
         PostActionLayoutScreen(
-            onBack = onBack
+            onBack = onBack,
         )
     }
 
     entry<Route.Settings.AppearanceDisplay>(
-        metadata = ListDetailSceneStrategy.detailPane(
-            sceneKey = "Settings"
-        )
+        metadata =
+            ListDetailSceneStrategy.detailPane(
+                sceneKey = "Settings",
+            ),
     ) {
         AppearanceDisplayScreen(
-            onBack = onBack
+            onBack = onBack,
         )
     }
 
     entry<Route.Settings.AppearanceMedia>(
-        metadata = ListDetailSceneStrategy.detailPane(
-            sceneKey = "Settings"
-        )
+        metadata =
+            ListDetailSceneStrategy.detailPane(
+                sceneKey = "Settings",
+            ),
     ) {
         AppearanceMediaScreen(
-            onBack = onBack
+            onBack = onBack,
         )
     }
 
     entry<Route.Settings.Behavior>(
-        metadata = ListDetailSceneStrategy.detailPane(
-            sceneKey = "Settings"
-        )
+        metadata =
+            ListDetailSceneStrategy.detailPane(
+                sceneKey = "Settings",
+            ),
     ) {
         BehaviorScreen(
             toLinkOpenDefaults = {
@@ -152,9 +210,10 @@ internal fun EntryProviderScope<NavKey>.settingsSelectEntryBuilder(
     }
 
     entry<Route.Settings.LinkOpenDefaults>(
-        metadata = ListDetailSceneStrategy.detailPane(
-            sceneKey = "Settings"
-        )
+        metadata =
+            ListDetailSceneStrategy.detailPane(
+                sceneKey = "Settings",
+            ),
     ) {
         LinkOpenDefaultsScreen(
             onBack = onBack,
@@ -162,32 +221,35 @@ internal fun EntryProviderScope<NavKey>.settingsSelectEntryBuilder(
     }
 
     entry<Route.Settings.Storage>(
-        metadata = ListDetailSceneStrategy.detailPane(
-            sceneKey = "Settings"
-        )
+        metadata =
+            ListDetailSceneStrategy.detailPane(
+                sceneKey = "Settings",
+            ),
     ) {
         StorageScreen(
             onBack = onBack,
             toAppLog = {
                 navigate(Route.Settings.AppLogging)
-            }
+            },
         )
     }
 
     entry<Route.Settings.About>(
-        metadata = ListDetailSceneStrategy.detailPane(
-            sceneKey = "Settings"
-        )
+        metadata =
+            ListDetailSceneStrategy.detailPane(
+                sceneKey = "Settings",
+            ),
     ) {
         AboutScreen(
-            onBack = onBack
+            onBack = onBack,
         )
     }
 
     entry<Route.Settings.LocalFilter>(
-        metadata = ListDetailSceneStrategy.detailPane(
-            sceneKey = "Settings"
-        )
+        metadata =
+            ListDetailSceneStrategy.detailPane(
+                sceneKey = "Settings",
+            ),
     ) {
         LocalFilterScreen(
             onBack = onBack,
@@ -196,14 +258,15 @@ internal fun EntryProviderScope<NavKey>.settingsSelectEntryBuilder(
             },
             add = {
                 navigate(Route.Settings.LocalFilterEdit(null))
-            }
+            },
         )
     }
 
     entry<Route.Settings.LocalHistory>(
-        metadata = ListDetailSceneStrategy.detailPane(
-            sceneKey = "Settings"
-        )
+        metadata =
+            ListDetailSceneStrategy.detailPane(
+                sceneKey = "Settings",
+            ),
     ) {
         LocalCacheSearchScreen(
             onBack = onBack,
@@ -220,9 +283,10 @@ internal fun EntryProviderScope<NavKey>.settingsSelectEntryBuilder(
     }
 
     entry<Route.Settings.AgentHistory>(
-        metadata = ListDetailSceneStrategy.detailPane(
-            sceneKey = "Settings"
-        )
+        metadata =
+            ListDetailSceneStrategy.detailPane(
+                sceneKey = "Settings",
+            ),
     ) {
         AgentChatHistoryScreen(
             onBack = onBack,
@@ -240,72 +304,78 @@ internal fun EntryProviderScope<NavKey>.settingsSelectEntryBuilder(
     }
 
     entry<Route.Settings.AiConfig>(
-        metadata = ListDetailSceneStrategy.detailPane(
-            sceneKey = "Settings"
-        )
+        metadata =
+            ListDetailSceneStrategy.detailPane(
+                sceneKey = "Settings",
+            ),
     ) {
         AiConfigScreen(
-            onBack = onBack
+            onBack = onBack,
         )
     }
 
     entry<Route.Settings.TranslationConfig>(
-        metadata = ListDetailSceneStrategy.detailPane(
-            sceneKey = "Settings"
-        )
+        metadata =
+            ListDetailSceneStrategy.detailPane(
+                sceneKey = "Settings",
+            ),
     ) {
         TranslationConfigScreen(
-            onBack = onBack
+            onBack = onBack,
         )
     }
 
     entry<Route.Settings.ColorPicker>(
-        metadata = DialogSceneStrategy.dialog()
+        metadata = DialogSceneStrategy.dialog(),
     ) {
         ColorPickerDialog(
-            onBack = onBack
+            onBack = onBack,
         )
     }
 
     entry<Route.Settings.AppLogging>(
-        metadata = ListDetailSceneStrategy.detailPane(
-            sceneKey = "Settings"
-        )
+        metadata =
+            ListDetailSceneStrategy.detailPane(
+                sceneKey = "Settings",
+            ),
     ) {
         AppLoggingScreen(
-            onBack = onBack
+            onBack = onBack,
         )
     }
 
     entry<Route.Settings.NostrRelays>(
-        metadata = ListDetailSceneStrategy.detailPane(
-            sceneKey = "Settings"
-        )
+        metadata =
+            ListDetailSceneStrategy.detailPane(
+                sceneKey = "Settings",
+            ),
     ) { args ->
         NostrRelaysScreen(
             accountKey = args.accountKey,
-            onBack = onBack
+            onBack = onBack,
         )
     }
 
     entry<Route.Settings.LocalFilterEdit>(
-        metadata = ListDetailSceneStrategy.extraPane(
-            sceneKey = "Settings"
-        )
+        metadata =
+            ListDetailSceneStrategy.extraPane(
+                sceneKey = "Settings",
+            ),
     ) { args ->
         LocalFilterEditDialog(
             keyword = args.keyword,
-            onBack = onBack
+            onBack = onBack,
         )
     }
 
     entry<Route.Settings.ColorSpace>(
-        metadata = ListDetailSceneStrategy.extraPane(
-            sceneKey = "Settings"
-        )
+        metadata =
+            ListDetailSceneStrategy.extraPane(
+                sceneKey = "Settings",
+            ),
     ) { args ->
         ColorSpaceScreen(
-            onBack = onBack
+            onBack = onBack,
         )
     }
 }

@@ -12,6 +12,7 @@ import dev.dimension.flare.data.datasource.microblog.NotificationFilter
 import dev.dimension.flare.data.datasource.microblog.NotificationTimelineDataSource
 import dev.dimension.flare.data.datasource.microblog.PostEvent
 import dev.dimension.flare.data.datasource.microblog.ProfileTab
+import dev.dimension.flare.data.datasource.microblog.SearchOperation
 import dev.dimension.flare.data.datasource.microblog.datasource.PostDataSource
 import dev.dimension.flare.data.datasource.microblog.datasource.RelationDataSource
 import dev.dimension.flare.data.datasource.microblog.datasource.TimelineTabConfigurationDataSource
@@ -28,6 +29,7 @@ import dev.dimension.flare.data.datasource.microblog.paging.PagingResult
 import dev.dimension.flare.data.datasource.microblog.paging.RemoteLoader
 import dev.dimension.flare.data.datasource.microblog.paging.notSupported
 import dev.dimension.flare.data.model.IconType
+import dev.dimension.flare.data.model.ProxyRef
 import dev.dimension.flare.data.model.tab.ShortcutSpec
 import dev.dimension.flare.data.model.tab.TimelineSpec
 import dev.dimension.flare.data.network.nostr.AmberSignerBridge
@@ -61,6 +63,7 @@ internal typealias NostrServiceManager = SwitchingServiceManager<NostrCredential
 internal class NostrDataSource(
     override val accountKey: MicroBlogKey,
     private val credentialFlow: Flow<NostrCredential>,
+    private val suppliedServiceManager: NostrServiceManager? = null,
 ) : AuthenticatedMicroblogDataSource,
     NotificationTimelineDataSource,
     ComposeDataSource,
@@ -105,7 +108,7 @@ internal class NostrDataSource(
     }
 
     private val serviceManager by lazy {
-        SwitchingServiceManager(
+        suppliedServiceManager ?: SwitchingServiceManager(
             credentialFlow.distinctUntilChangedBy { it.signerStableId(accountKey) },
             ioScope,
             {
@@ -150,6 +153,7 @@ internal class NostrDataSource(
 
     override val userHandler by lazy {
         UserHandler(
+            proxy = ProxyRef.forAccount(accountKey),
             host = NostrService.NOSTR_HOST,
             loader = loader,
         )
@@ -186,6 +190,7 @@ internal class NostrDataSource(
     override fun homeTimeline(): RemoteLoader<UiTimelineV2> =
         object : CacheableRemoteLoader<UiTimelineV2> {
             override val pagingKey: String = "home_$accountKey"
+            override val canJoinTimeline: Boolean = true
 
             override suspend fun load(
                 pageSize: Int,
@@ -278,6 +283,8 @@ internal class NostrDataSource(
             accountKey = accountKey,
             serviceManager = serviceManager,
         )
+
+    override val searchOperations: Set<SearchOperation> = setOf(SearchOperation.Posts, SearchOperation.Profiles)
 
     override fun searchStatus(query: String): RemoteLoader<UiTimelineV2> =
         object : CacheableRemoteLoader<UiTimelineV2> {
@@ -470,7 +477,7 @@ internal class NostrDataSource(
         }
     }
 
-    override suspend fun compose(
+    override suspend fun publish(
         data: ComposeData,
         progress: () -> Unit,
     ) {
@@ -527,7 +534,6 @@ internal class NostrDataSource(
 
     override fun composeConfig(type: ComposeType): ComposeConfig =
         ComposeConfig(
-            text = ComposeConfig.Text(65535),
             contentWarning = ComposeConfig.ContentWarning,
             media =
                 ComposeConfig.Media(

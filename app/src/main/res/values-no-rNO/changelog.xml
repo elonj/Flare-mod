@@ -5,11 +5,10 @@
     <string name="changelog_current"><![CDATA[
             <span>Versjon %1$s:</span>
             <ul>
-                <li>Lagt til avspilling av Pixiv Ugoira-animasjoner og lagring som MP4-videoer.</li>
-                <li>Dra opp i medievisningen for å se innleggets detaljer og handlinger.</li>
-                <li>Bluesky støtter nå opplasting av GIF og MOV. Videolagring er rettet, og hjemmetidslinjen skjuler svar til kontoer du ikke følger.</li>
-                <li>Forbedret opplasting av medier og ny sending av utkast.</li>
-                <li>Feilrettinger og ytelsesforbedringer.</li>
+                <li>Videoer husker avspillingshastigheten, med nye valg opptil 16×.</li>
+                <li>Bytt mellom originaltekst og oversettelse i artikler, RSS-oppføringer og galleridetaljer.</li>
+                <li>Søk og Utforsk viser bare seksjoner som den valgte kontoen støtter.</li>
+                <li>Rettet noen problemer med innlogging via nettet.</li>
             </ul>
         ]]></string>
 </resources>

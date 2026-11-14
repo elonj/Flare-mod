@@ -42,14 +42,13 @@ import dev.dimension.flare.LocalWindowPadding
 import dev.dimension.flare.RegisterTabCallback
 import dev.dimension.flare.Res
 import dev.dimension.flare.ask_ai
+import dev.dimension.flare.common.isEmpty
 import dev.dimension.flare.common.onLoading
 import dev.dimension.flare.common.onSuccess
-import dev.dimension.flare.common.refreshSuspend
 import dev.dimension.flare.data.model.TimelineDisplayMode
 import dev.dimension.flare.delete
 import dev.dimension.flare.hashtags
 import dev.dimension.flare.model.AccountType
-import dev.dimension.flare.model.MicroBlogKey
 import dev.dimension.flare.statues
 import dev.dimension.flare.ui.component.AvatarComponent
 import dev.dimension.flare.ui.component.AvatarComponentDefaults
@@ -62,6 +61,7 @@ import dev.dimension.flare.ui.component.platform.isBigScreen
 import dev.dimension.flare.ui.component.status.CommonStatusHeaderComponent
 import dev.dimension.flare.ui.component.status.LazyStatusVerticalStaggeredGrid
 import dev.dimension.flare.ui.component.status.UserPlaceholder
+import dev.dimension.flare.ui.component.status.pagingError
 import dev.dimension.flare.ui.component.status.status
 import dev.dimension.flare.ui.model.onSuccess
 import dev.dimension.flare.ui.presenter.home.DiscoverPresenter
@@ -90,7 +90,6 @@ import org.jetbrains.compose.resources.stringResource
 @OptIn(ExperimentalLayoutApi::class, ExperimentalFluentApi::class)
 @Composable
 internal fun DiscoverScreen(
-    toUser: (AccountType, MicroBlogKey) -> Unit,
     toSearch: (AccountType, String) -> Unit,
     toAskAi: (String?) -> Unit,
 ) {
@@ -127,9 +126,9 @@ internal fun DiscoverScreen(
                             lineLimits = TextFieldLineLimits.SingleLine,
                             onKeyboardAction = {
                                 if (state.textState.text.isNotBlank()) {
-                                    state.selectedAccount?.let { user ->
+                                    if (state.isAccountReady) {
                                         toSearch(
-                                            AccountType.Specific(user.key),
+                                            state.selectedAccountType,
                                             state.textState.text.toString(),
                                         )
                                     }
@@ -166,9 +165,9 @@ internal fun DiscoverScreen(
                                     items(searchResult) {
                                         ListItem(
                                             onClick = {
-                                                state.selectedAccount?.let { user ->
+                                                if (state.isAccountReady) {
                                                     toSearch(
-                                                        AccountType.Specific(user.key),
+                                                        state.selectedAccountType,
                                                         it.keyword,
                                                     )
                                                 }
@@ -210,7 +209,7 @@ internal fun DiscoverScreen(
                 }
             }
             state.accounts.onSuccess { accounts ->
-                if (accounts.size > 1) {
+                if (state.canSwitchAccount) {
                     item(
                         span = StaggeredGridItemSpan.FullLine,
                     ) {
@@ -229,7 +228,7 @@ internal fun DiscoverScreen(
                         ) {
                             accounts.forEach { profile ->
                                 PillButton(
-                                    selected = state.selectedAccount?.key == profile.key,
+                                    selected = state.selectedAccountKey == profile.key,
                                     onSelectedChanged = {
                                         if (it) {
                                             state.setAccount(profile)
@@ -244,7 +243,7 @@ internal fun DiscoverScreen(
                                             size = AvatarComponentDefaults.compatSize,
                                         )
                                         Text(
-                                            profile.handle.canonical,
+                                            profile.handle.display,
                                             maxLines = 1,
                                             modifier = Modifier.padding(start = 8.dp),
                                         )
@@ -302,20 +301,10 @@ internal fun DiscoverScreen(
                                     modifier =
                                         Modifier
                                             .width(256.dp),
-                                    onClick = {
-                                    },
                                 ) {
                                     if (user != null) {
                                         CommonStatusHeaderComponent(
                                             data = user,
-                                            onUserClick = {
-                                                state.selectedAccount?.let {
-                                                    toUser.invoke(
-                                                        AccountType.Specific(it.key),
-                                                        user.key,
-                                                    )
-                                                }
-                                            },
                                             modifier = Modifier.padding(8.dp),
                                         )
                                     } else {
@@ -380,6 +369,7 @@ internal fun DiscoverScreen(
                         }
                     }
                 }
+            pagingError(state.users)
             state.hashtags.onSuccess {
                 item(
                     span = StaggeredGridItemSpan.FullLine,
@@ -422,10 +412,11 @@ internal fun DiscoverScreen(
                         ) {
                             val hashtag = get(it)
                             Card(
+                                disabled = !state.canSearchPosts || hashtag == null,
                                 onClick = {
                                     hashtag?.searchContent?.let { it1 ->
-                                        state.selectedAccount?.let { user ->
-                                            toSearch(AccountType.Specific(user.key), it1)
+                                        if (state.isAccountReady) {
+                                            toSearch(state.selectedAccountType, it1)
                                         }
                                     }
                                 },
@@ -458,22 +449,13 @@ internal fun DiscoverScreen(
                     }
                 }
             }
-            state.status
-                .onSuccess {
-                    item(
-                        span = StaggeredGridItemSpan.FullLine,
-                    ) {
-                        Header(stringResource(Res.string.statues))
-                    }
-                    status(state.status)
-                }.onLoading {
-                    item(
-                        span = StaggeredGridItemSpan.FullLine,
-                    ) {
-                        Header(stringResource(Res.string.statues))
-                    }
-                    status(state.status)
+            pagingError(state.hashtags)
+            if (!state.status.isEmpty) {
+                item(span = StaggeredGridItemSpan.FullLine) {
+                    Header(stringResource(Res.string.statues))
                 }
+                status(state.status)
+            }
         }
     }
 }
@@ -517,11 +499,7 @@ private fun presenter() =
             }
 
             fun refresh() {
-                scope.launch {
-                    state.users.refreshSuspend()
-                    state.hashtags.refreshSuspend()
-                    state.status.refreshSuspend()
-                }
+                scope.launch { state.refreshSuspend() }
             }
         }
     }

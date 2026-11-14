@@ -15,6 +15,7 @@ import dev.dimension.flare.data.datasource.microblog.NotificationFilter
 import dev.dimension.flare.data.datasource.microblog.NotificationTimelineDataSource
 import dev.dimension.flare.data.datasource.microblog.PostEvent
 import dev.dimension.flare.data.datasource.microblog.ProfileTab
+import dev.dimension.flare.data.datasource.microblog.SearchOperation
 import dev.dimension.flare.data.datasource.microblog.datasource.ArticleDataSource
 import dev.dimension.flare.data.datasource.microblog.datasource.ListDataSource
 import dev.dimension.flare.data.datasource.microblog.datasource.NotificationDataSource
@@ -35,6 +36,7 @@ import dev.dimension.flare.data.datasource.microblog.handler.UserHandler
 import dev.dimension.flare.data.datasource.microblog.paging.RemoteLoader
 import dev.dimension.flare.data.datasource.microblog.paging.notSupported
 import dev.dimension.flare.data.model.IconType
+import dev.dimension.flare.data.model.ProxyRef
 import dev.dimension.flare.data.model.tab.ShortcutSpec
 import dev.dimension.flare.data.model.tab.TimelineSpec
 import dev.dimension.flare.data.network.xqt.XQTMediaUploader
@@ -197,6 +199,7 @@ internal class XQTDataSource(
 
     override val userHandler by lazy {
         UserHandler(
+            proxy = ProxyRef.forAccount(accountKey),
             host = accountKey.host,
             loader = loader,
         )
@@ -523,7 +526,7 @@ internal class XQTDataSource(
             statusOnly = false,
         )
 
-    override suspend fun compose(
+    override suspend fun publish(
         data: ComposeData,
         progress: () -> Unit,
     ) {
@@ -610,6 +613,8 @@ internal class XQTDataSource(
         )
     }
 
+    override val searchOperations: Set<SearchOperation> = SearchOperation.entries.toSet() - SearchOperation.DiscoverPosts
+
     override fun searchStatus(query: String) =
         SearchStatusPagingSource(
             service,
@@ -642,7 +647,7 @@ internal class XQTDataSource(
             text = ComposeConfig.Text.withLength(280, String::xWeightedLength),
             media =
                 ComposeConfig.Media(
-                    maxCount = 4,
+                    maxCount = 20,
                     canSensitive = true,
                     altTextMaxLength = 1000,
                     allowMediaOnly = true,
@@ -841,6 +846,7 @@ internal class XQTDataSource(
                                     ?.render(accountKey = accountKey)
                             }.toImmutableList()
                     UiPodcast(
+                        proxy = ProxyRef.forAccount(accountKey),
                         id = id,
                         title = title ?: "",
                         playbackUrl = null,

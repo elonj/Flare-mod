@@ -21,6 +21,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -44,6 +45,7 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.audio.DefaultAudioSink
 import androidx.media3.ui.compose.PlayerSurface
 import androidx.media3.ui.compose.modifiers.resizeWithContentScale
 import androidx.media3.ui.compose.state.rememberPresentationState
@@ -52,7 +54,7 @@ import compose.icons.fontawesomeicons.Solid
 import compose.icons.fontawesomeicons.solid.CirclePlay
 import dev.dimension.flare.compose.ui.Res
 import dev.dimension.flare.compose.ui.media_play_video
-import kotlinx.collections.immutable.ImmutableMap
+import dev.dimension.flare.ui.model.UiMedia
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.delay
@@ -75,9 +77,7 @@ private val audioAttributes by lazy {
 @OptIn(UnstableApi::class, ExperimentalFoundationApi::class)
 @Composable
 public fun VideoPlayer(
-    uri: String,
-    customHeaders: ImmutableMap<String, String>? = null,
-    previewUri: String?,
+    media: UiMedia,
     contentDescription: String?,
     modifier: Modifier = Modifier,
     muted: Boolean = false,
@@ -88,9 +88,10 @@ public fun VideoPlayer(
     onClick: (() -> Unit)? = null,
     onLongClick: (() -> Unit)? = null,
     autoPlay: Boolean = true,
+    playbackSpeed: Float = 1f,
     remainingTimeContent: @Composable (BoxScope.(Long) -> Unit)? = null,
     loadingPlaceholder: @Composable BoxScope.() -> Unit = {
-        if (previewUri != null) {
+        if (media.preview != null) {
             Box(
                 modifier =
                     Modifier
@@ -98,8 +99,7 @@ public fun VideoPlayer(
                 contentAlignment = Alignment.Center,
             ) {
                 NetworkImage(
-                    model = previewUri,
-                    customHeaders = customHeaders,
+                    model = media.preview,
                     contentScale = contentScale,
                     contentDescription = contentDescription,
                     modifier =
@@ -125,7 +125,7 @@ public fun VideoPlayer(
         }
     },
     idlePlaceholder: @Composable BoxScope.() -> Unit = {
-        if (previewUri != null) {
+        if (media.preview != null) {
             Box(
                 modifier =
                     Modifier
@@ -133,8 +133,7 @@ public fun VideoPlayer(
                 contentAlignment = Alignment.Center,
             ) {
                 NetworkImage(
-                    model = previewUri,
-                    customHeaders = customHeaders,
+                    model = media.preview,
                     contentScale = contentScale,
                     contentDescription = contentDescription,
                     modifier =
@@ -164,14 +163,16 @@ public fun VideoPlayer(
         }
     },
 ) {
+    val uri = media.url
     var started by remember { mutableStateOf(false) }
     var resumed by remember { mutableStateOf(false) }
+    val route = rememberMediaProxySnapshot(media)
     val playback = rememberTimelinePlayback()
     val request =
-        remember(uri, customHeaders) {
-            VideoRequest(uri = uri, customHeaders = customHeaders?.toMap().orEmpty())
+        remember(media, route) {
+            VideoRequest(media = media, routeKey = route?.getOrNull()?.key.orEmpty())
         }
-    val binding = rememberSurfaceBinding(request, playback, muted)
+    val binding = rememberSurfaceBinding(request, playback, muted, playbackSpeed)
     val player = binding.first
 
     LifecycleResumeEffect(binding.second) {
@@ -225,13 +226,15 @@ private fun rememberSurfaceBinding(
     request: VideoRequest,
     playback: TimelinePlaybackCoordinator,
     muted: Boolean,
+    playbackSpeed: Float,
 ): Pair<ExoPlayer?, SurfaceBindingManager.Binding> {
     val manager: SurfaceBindingManager = koinInject()
     var player by remember(request, manager, playback, muted) { mutableStateOf<ExoPlayer?>(null) }
     val binding =
         remember(request, manager, playback, muted) {
-            manager.register(request, playback, muted) { player = it }
+            manager.register(request, playback, muted) { player = it }.apply { setPlaybackSpeed(playbackSpeed) }
         }
+    SideEffect { binding.setPlaybackSpeed(playbackSpeed) }
     DisposableEffect(binding, playback) {
         playback.register(binding, binding::setActive)
         onDispose {
@@ -243,9 +246,11 @@ private fun rememberSurfaceBinding(
 }
 
 internal data class VideoRequest(
-    val uri: String,
-    val customHeaders: Map<String, String> = emptyMap(),
-)
+    val media: UiMedia,
+    val routeKey: String,
+) {
+    val uri: String get() = media.url
+}
 
 @Stable
 @Single
@@ -257,7 +262,6 @@ public class SurfaceBindingManager(
         lazy {
             ExoPlayer
                 .Builder(context.applicationContext)
-                .setMediaSourceFactory(media3VideoCacheManager.mediaSourceFactory())
                 .build()
                 .apply {
                     repeatMode = Player.REPEAT_MODE_ALL
@@ -276,9 +280,11 @@ public class SurfaceBindingManager(
     private val suspendedPlaybacks = Collections.newSetFromMap(WeakHashMap<TimelinePlaybackCoordinator, Boolean>())
     private val startedActivities = Collections.newSetFromMap(WeakHashMap<Activity, Boolean>())
 
-    public fun playerFor(uri: String): ExoPlayer? = if (activeBinding != null && activeRequest?.uri == uri) player else null
+    public fun playerFor(media: UiMedia): ExoPlayer? = if (activeBinding != null && activeRequest?.media == media) player else null
 
     public interface Binding {
+        public fun setPlaybackSpeed(speed: Float)
+
         public fun setActive(active: Boolean)
 
         public fun dispose()
@@ -294,6 +300,26 @@ public class SurfaceBindingManager(
     ): Binding {
         playback.onClose(this) { release(playback) }
         return object : Binding {
+            private var playbackSpeed = 1f
+
+            override fun setPlaybackSpeed(speed: Float) {
+                playbackSpeed = speed
+                if (activeBinding === this) applyPlaybackSpeed()
+            }
+
+            private fun applyPlaybackSpeed() {
+                // shortcut: disable audio above Media3's speed limit until its sink supports higher rates.
+                val disableAudio = playbackSpeed > DefaultAudioSink.MAX_PLAYBACK_SPEED
+                if (player.trackSelectionParameters.disabledTrackTypes.contains(C.TRACK_TYPE_AUDIO) != disableAudio) {
+                    player.trackSelectionParameters =
+                        player.trackSelectionParameters
+                            .buildUpon()
+                            .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, disableAudio)
+                            .build()
+                }
+                player.setPlaybackSpeed(playbackSpeed)
+            }
+
             override fun setActive(active: Boolean) {
                 if (active) {
                     if (!foreground) {
@@ -312,14 +338,14 @@ public class SurfaceBindingManager(
                     if (activeRequest != request || player.playerError != null) {
                         val source =
                             media3VideoCacheManager
-                                .mediaSourceFactory(request.customHeaders)
+                                .mediaSourceFactory(request.media)
                                 .createMediaSource(MediaItem.fromUri(request.uri))
                         player.setMediaSource(source)
                         player.seekTo((playback.position(request.uri) * 1000).toLong())
                         player.prepare()
                         activeRequest = request
                     }
-                    player.setPlaybackSpeed(1f)
+                    applyPlaybackSpeed()
                     player.volume = 0f
                     player.setAudioAttributes(audioAttributes, false)
                     player.play()
@@ -411,7 +437,8 @@ public class SurfaceBindingManager(
         if (foreground == value) return
         foreground = value
         if (value) {
-            val playbacks = suspendedPlaybacks.toList()
+            // Weak keys can disappear after toList() reads size == 1.
+            val playbacks = suspendedPlaybacks.toMutableList()
             suspendedPlaybacks.clear()
             playbacks.forEach { it.setSuspended(false) }
         } else {

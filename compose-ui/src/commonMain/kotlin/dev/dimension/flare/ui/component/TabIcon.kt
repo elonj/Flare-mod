@@ -9,6 +9,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -58,13 +59,19 @@ import dev.dimension.flare.compose.ui.nostr_login_qr_button
 import dev.dimension.flare.compose.ui.nostr_login_title
 import dev.dimension.flare.compose.ui.pixiv_private_favourites_title
 import dev.dimension.flare.compose.ui.pixiv_private_following_title
+import dev.dimension.flare.compose.ui.pixiv_ranking_day_ai_title
 import dev.dimension.flare.compose.ui.pixiv_ranking_day_female_title
 import dev.dimension.flare.compose.ui.pixiv_ranking_day_male_title
 import dev.dimension.flare.compose.ui.pixiv_ranking_day_manga_title
+import dev.dimension.flare.compose.ui.pixiv_ranking_day_r18_ai_title
+import dev.dimension.flare.compose.ui.pixiv_ranking_day_r18_title
 import dev.dimension.flare.compose.ui.pixiv_ranking_month_title
 import dev.dimension.flare.compose.ui.pixiv_ranking_week_original_title
+import dev.dimension.flare.compose.ui.pixiv_ranking_week_r18_title
 import dev.dimension.flare.compose.ui.pixiv_ranking_week_rookie_title
 import dev.dimension.flare.compose.ui.pixiv_ranking_week_title
+import dev.dimension.flare.compose.ui.plugin_login_qr_new_code
+import dev.dimension.flare.compose.ui.plugin_login_qr_retry_save
 import dev.dimension.flare.compose.ui.posts_title
 import dev.dimension.flare.compose.ui.posts_with_replies_title
 import dev.dimension.flare.compose.ui.profile_tab_articles
@@ -75,7 +82,10 @@ import dev.dimension.flare.compose.ui.settings_title
 import dev.dimension.flare.compose.ui.social_title
 import dev.dimension.flare.compose.ui.tab_settings_default
 import dev.dimension.flare.compose.ui.tab_settings_filter_repost
+import dev.dimension.flare.compose.ui.weibo_friends_circle_title
+import dev.dimension.flare.compose.ui.weibo_private_following_title
 import dev.dimension.flare.data.model.IconType
+import dev.dimension.flare.data.model.ProxyRef
 import dev.dimension.flare.data.model.tab.UiTimelineTabItem
 import dev.dimension.flare.model.AccountType
 import dev.dimension.flare.ui.component.platform.PlatformText
@@ -84,6 +94,7 @@ import dev.dimension.flare.ui.model.UiStrings
 import dev.dimension.flare.ui.model.UiText
 import dev.dimension.flare.ui.model.onLoading
 import dev.dimension.flare.ui.model.onSuccess
+import dev.dimension.flare.ui.model.toUiImage
 import dev.dimension.flare.ui.presenter.home.FavIconPresenter
 import dev.dimension.flare.ui.presenter.home.UserPresenter
 import dev.dimension.flare.ui.presenter.invoke
@@ -95,6 +106,17 @@ import org.jetbrains.compose.resources.stringResource
 
 private val FavIconShape = RoundedCornerShape(4.dp)
 
+public val LocalExternalTextResolver: androidx.compose.runtime.ProvidableCompositionLocal<(UiText.ExternalRef) -> String> =
+    staticCompositionLocalOf { { text: UiText.ExternalRef -> text.fallbackText() } }
+
+@Composable
+public fun UiText.resolveText(): String =
+    when (this) {
+        is UiText.Localized -> stringResource(string.res)
+        is UiText.Raw -> string
+        is UiText.ExternalRef -> LocalExternalTextResolver.current(this)
+    }
+
 @Composable
 public fun Text(
     text: UiText,
@@ -105,10 +127,7 @@ public fun Text(
 ) {
     PlatformText(
         text =
-            when (text) {
-                is UiText.Localized -> stringResource(text.string.res)
-                is UiText.Raw -> text.string
-            },
+            text.resolveText(),
         modifier = modifier,
         color = color,
         fontSize = fontSize,
@@ -146,11 +165,18 @@ public fun TabIcon(
     color: Color = PlatformContentColor.current,
     size: Dp = 24.dp,
 ) {
-    val text =
-        when (title) {
-            is UiText.Localized -> stringResource(title.string.res)
-            is UiText.Raw -> title.string
-        }
+    TabIcon(icon, title.resolveText(), modifier, iconOnly, color, size)
+}
+
+@Composable
+public fun TabIcon(
+    icon: IconType,
+    contentDescription: String? = null,
+    modifier: Modifier = Modifier,
+    iconOnly: Boolean = false,
+    color: Color = PlatformContentColor.current,
+    size: Dp = 24.dp,
+) {
     when (icon) {
         is IconType.Avatar -> {
             val userState by producePresenter(key = "avatar:${icon.accountKey}") {
@@ -172,7 +198,7 @@ public fun TabIcon(
         is IconType.Material -> {
             FAIcon(
                 imageVector = icon.icon.toImageVector(),
-                contentDescription = text,
+                contentDescription = contentDescription,
                 modifier =
                     modifier
                         .size(size),
@@ -184,7 +210,7 @@ public fun TabIcon(
             if (iconOnly) {
                 FAIcon(
                     imageVector = icon.icon.toImageVector(),
-                    contentDescription = text,
+                    contentDescription = contentDescription,
                     modifier =
                         modifier
                             .size(size),
@@ -214,7 +240,7 @@ public fun TabIcon(
                         }
                     FAIcon(
                         imageVector = icon.icon.toImageVector(),
-                        contentDescription = text,
+                        contentDescription = contentDescription,
                         modifier =
                             Modifier
                                 .size(size / 2)
@@ -228,8 +254,8 @@ public fun TabIcon(
 
         is IconType.Url -> {
             NetworkImage(
-                icon.url,
-                contentDescription = text,
+                remember(icon.url) { icon.url.toUiImage(proxy = ProxyRef.Global) },
+                contentDescription = contentDescription,
                 modifier =
                     modifier
                         .size(size)
@@ -239,7 +265,7 @@ public fun TabIcon(
         }
 
         is IconType.FavIcon -> {
-            FavIcon(icon.host, modifier, title, size)
+            FavIcon(icon.host, modifier, contentDescription?.let(UiText::Raw), size)
         }
     }
 }
@@ -261,13 +287,8 @@ public fun FavIcon(
     iconState
         .onSuccess {
             NetworkImage(
-                it,
-                contentDescription =
-                    when (title) {
-                        is UiText.Localized -> stringResource(title.string.res)
-                        is UiText.Raw -> title.string
-                        null -> null
-                    },
+                it.toUiImage(proxy = ProxyRef.Global),
+                contentDescription = title?.resolveText(),
                 modifier =
                     modifier
                         .size(size)
@@ -345,6 +366,10 @@ internal val UiStrings.res: StringResource
 
             UiStrings.Articles -> Res.string.profile_tab_articles
 
+            UiStrings.WeiboFriendsCircle -> Res.string.weibo_friends_circle_title
+
+            UiStrings.WeiboPrivateFollowing -> Res.string.weibo_private_following_title
+
             UiStrings.Media -> Res.string.media_title
 
             UiStrings.Channel -> Res.string.channel_title
@@ -369,6 +394,10 @@ internal val UiStrings.res: StringResource
 
             UiStrings.QrConnect -> Res.string.nostr_login_qr_button
 
+            UiStrings.QrLoginNewCode -> Res.string.plugin_login_qr_new_code
+
+            UiStrings.QrLoginRetrySave -> Res.string.plugin_login_qr_retry_save
+
             UiStrings.CredentialImport -> Res.string.nostr_login_title
 
             UiStrings.ExternalSigner -> Res.string.nostr_login_amber_button
@@ -390,6 +419,14 @@ internal val UiStrings.res: StringResource
             UiStrings.PixivRankingWeekRookie -> Res.string.pixiv_ranking_week_rookie_title
 
             UiStrings.PixivRankingDayManga -> Res.string.pixiv_ranking_day_manga_title
+
+            UiStrings.PixivRankingDayAi -> Res.string.pixiv_ranking_day_ai_title
+
+            UiStrings.PixivRankingDayR18 -> Res.string.pixiv_ranking_day_r18_title
+
+            UiStrings.PixivRankingWeekR18 -> Res.string.pixiv_ranking_week_r18_title
+
+            UiStrings.PixivRankingDayR18Ai -> Res.string.pixiv_ranking_day_r18_ai_title
 
             UiStrings.Illustrations -> Res.string.illustrations_title
 

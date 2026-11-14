@@ -38,8 +38,10 @@ kotlin {
                 implementation(libs.koog.agents.features.memory)
                 implementation(libs.koog.http.client.ktor)
                 implementation(libs.bundles.kotlinx)
+                implementation(libs.okio)
                 implementation(libs.room.runtime)
                 implementation(libs.sqlite)
+                implementation(libs.sqlite.async)
                 implementation(dependencies.platform(libs.koin.bom))
                 implementation(libs.koin.core)
                 implementation(libs.koin.annotations)
@@ -54,6 +56,8 @@ kotlin {
             dependencies {
                 implementation(kotlin("test"))
                 implementation(libs.kotlinx.coroutines.test)
+                implementation(libs.molecule.runtime)
+                implementation(libs.ktor.client.mock)
             }
         }
     }

@@ -4,7 +4,6 @@ on:
   # 本仓库只需要 Android APK（由 build-flare.yml 负责）；此工作流仅保留手动触发
   workflow_dispatch:
 
-permissions:
 jobs:
   crowdin:
     runs-on: ubuntu-latest
